@@ -1,0 +1,8 @@
+[package]
+name = "constellation"
+version = "0.1.0"
+authors = ["Thomas Gillen <thomas.gillen@googlemail.com>"]
+
+[dependencies]
+crossbeam = "0.2"
+scoped-pool = "1"
