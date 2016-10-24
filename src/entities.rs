@@ -12,6 +12,10 @@ pub trait Handle<TIndex, TGeneration> : Clone + Copy + fmt::Display {
     fn generation(&self) -> TGeneration;
 }
 
+/// A handle onto an entity in a scene.
+///
+/// An entity handle is opaque data understandable onto to the `EntityManager` and used as a key
+/// when attaching components to an entity.
 #[derive(PartialEq, Eq, Debug, Copy, Clone, Hash)]
 pub struct Entity(u32);
 
@@ -121,7 +125,9 @@ pub struct Entities<TKey: EntityKey> {
     allocated: AtomicUsize,
     generations: Vec<Generation>,
     free: SegQueue<Index>,
-    keys: Vec<TKey>
+    keys: Vec<TKey>,
+    created_pool: SegQueue<Vec<(Entity, TKey)>>,
+    deleted_pool: SegQueue<Vec<Index>>
 }
 
 pub struct EntityIter<'a, TKey: EntityKey + 'a> {
@@ -155,7 +161,9 @@ impl<TKey: EntityKey> Entities<TKey> {
             free: SegQueue::new(),
             free_count_approx: AtomicUsize::new(0),
             allocated: AtomicUsize::new(0),
-            keys: Vec::new()
+            keys: Vec::new(),
+            created_pool: SegQueue::new(),
+            deleted_pool: SegQueue::new()
         }
     }
 
@@ -205,7 +213,17 @@ impl<TKey: EntityKey> Entities<TKey> {
     }
 
     pub fn transaction(&self) -> EntitiesTransaction<TKey> {
-        EntitiesTransaction::new(self)
+        EntitiesTransaction {
+            entities: self,
+            created: match self.created_pool.try_pop() {
+                Some(vec) => vec,
+                None      => Vec::new()
+            },
+            deleted: match self.deleted_pool.try_pop() {
+                Some(vec) => vec,
+                None      => Vec::new()
+            }
+        }
     }
 
     pub fn merge(&mut self, mut changes: EntityChangeSet<TKey>) {
@@ -223,6 +241,9 @@ impl<TKey: EntityKey> Entities<TKey> {
         for (entity, key) in changes.created.drain(..) {
             self.keys[entity.index() as usize] = key
         }
+
+        self.created_pool.push(changes.created);
+        self.deleted_pool.push(changes.deleted);
     }
 
     pub fn commit_allocations(&mut self) {
@@ -285,14 +306,6 @@ impl<'a, TKey: 'a + EntityKey> Iterator for TransactionEntitiesIter<'a, TKey> {
 }
 
 impl<'a, TKey: EntityKey> EntitiesTransaction<'a, TKey> {
-    pub fn new(entities: &Entities<TKey>) -> EntitiesTransaction<TKey> {
-        EntitiesTransaction {
-            entities: entities,
-            created: Vec::new(),
-            deleted: Vec::new()
-        }
-    }
-
     pub fn create(&mut self) -> Entity {
         let entity = self.entities.allocate();
         self.created.push((entity, TKey::new()));
