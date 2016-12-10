@@ -4,5 +4,7 @@ version = "0.1.0"
 authors = ["Thomas Gillen <thomas.gillen@googlemail.com>"]
 
 [dependencies]
+mopa = "0.2"
 crossbeam = "0.2"
-scoped-pool = "1"
+rayon = "0.5.0"
+arrayvec = "0.3.20"

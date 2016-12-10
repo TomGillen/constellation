@@ -1,11 +1,8 @@
+#[macro_use]
+extern crate mopa;
 extern crate crossbeam;
-extern crate scoped_pool;
+extern crate rayon;
+extern crate arrayvec;
 
 pub mod entities;
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn it_works() {
-    }
-}
+pub mod world;
