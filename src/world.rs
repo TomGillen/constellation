@@ -125,67 +125,60 @@ pub fn system<F>(mut f: F) -> Box<System>
     })
 }
 
-pub fn system_r1w0<F, R1: Resource>(world: &World, mut f: F) -> Box<System>
-    where F: for<'a, 'b> FnMut(&'a mut EntitiesTransaction<'b>, &'b R1) + Send + 'static
-{
-    let r1_mask = 1u64 << world.get_resource_id::<R1>().unwrap();
+macro_rules! impl_system {
+    ($name:ident [$($read:ident),*] [$($write:ident),*]) => (
+        #[allow(non_snake_case, unused_variables)]
+        pub fn $name<$($read,)* $($write,)* F>(world: &World, mut f: F) -> Box<System>
+            where $($read:Resource,)*
+                  $($write:Resource,)*
+                  F: for<'a, 'b> FnMut(&'a mut EntitiesTransaction<'b>, $(&'b $read,)* $(&'b mut $write,)*) + Send + 'static
+        {
+            let system = move |world: &World| {
+                $(let (_, $read) = world.get_resource::<$read>().unwrap();)*
+                $(let (_, mut $write) = world.get_resource_mut::<$write>().unwrap();)*
 
-    let system = move |world: &World| {
-        let (_, r1) = world.get_resource::<R1>().unwrap();
+                let mut tx = world.entities.transaction();
+                f(&mut tx, $($read.deref(),)* $($write.deref_mut(),)*);
+                tx.to_change_set()
+            };
 
-        let mut tx = world.entities.transaction();
-        f(&mut tx, r1.deref());
-        tx.to_change_set()
-    };
+            $(let $read = 1u64 << world.get_resource_id::<$read>().unwrap();)*
+            $(let $write = 1u64 << world.get_resource_id::<$write>().unwrap();)*
 
-    Box::new(FnSystem {
-        read: 0 | r1_mask,
-        write: 0,
-        f: system
-    })
+            Box::new(FnSystem {
+                read: 0 $(| $write)* $(| $read)*,
+                write: 0 $(| $write)*,
+                f: system
+            })
+        }
+    )
 }
 
-pub fn system_r0w1<F, W1: Resource>(world: &World, mut f: F) -> Box<System>
-    where F: for<'a, 'b> FnMut(&'a mut EntitiesTransaction<'b>, &'b mut W1) + Send + 'static
-{
-    let w1_mask = 1u64 << world.get_resource_id::<W1>().unwrap();
-
-    let system = move |world: &World| {
-        let (_, mut w1) = world.get_resource_mut::<W1>().unwrap();
-
-        let mut tx = world.entities.transaction();
-        f(&mut tx, w1.deref_mut());
-        tx.to_change_set()
-    };
-
-    Box::new(FnSystem {
-        read: 0 | w1_mask,
-        write: 0 | w1_mask,
-        f: system
-    })
-}
-
-pub fn system_r1w1<F, R1: Resource, W1: Resource>(world: &World, mut f: F) -> Box<System>
-    where F: for<'a, 'b> FnMut(&'a mut EntitiesTransaction<'b>, &'b R1, &'b mut W1) + Send + 'static
-{
-    let r1_mask = 1u64 << world.get_resource_id::<R1>().unwrap();
-    let w1_mask = 1u64 << world.get_resource_id::<W1>().unwrap();
-
-    let system = move |world: &World| {
-        let (_, r1) = world.get_resource::<R1>().unwrap();
-        let (_, mut w1) = world.get_resource_mut::<W1>().unwrap();
-
-        let mut tx = world.entities.transaction();
-        f(&mut tx, r1.deref(), w1.deref_mut());
-        tx.to_change_set()
-    };
-
-    Box::new(FnSystem {
-        read: 0 | r1_mask | w1_mask,
-        write: 0 | w1_mask,
-        f: system
-    })
-}
+impl_system!(system_r0w0 [] []);
+impl_system!(system_r1w0 [R0] []);
+impl_system!(system_r2w0 [R0, R1] []);
+impl_system!(system_r3w0 [R0, R1, R2] []);
+impl_system!(system_r4w0 [R0, R1, R2, R3] []);
+impl_system!(system_r5w0 [R0, R1, R2, R3, R4] []);
+impl_system!(system_r6w0 [R0, R1, R2, R3, R4, R5] []);
+impl_system!(system_r1w1 [R0] [W0]);
+impl_system!(system_r2w1 [R0, R1] [W0]);
+impl_system!(system_r3w1 [R0, R1, R2] [W0]);
+impl_system!(system_r4w1 [R0, R1, R2, R3] [W0]);
+impl_system!(system_r5w1 [R0, R1, R2, R3, R4] [W0]);
+impl_system!(system_r6w1 [R0, R1, R2, R3, R4, R5] [W0]);
+impl_system!(system_r1w2 [R0] [W0, W1]);
+impl_system!(system_r2w2 [R0, R1] [W0, W1]);
+impl_system!(system_r3w2 [R0, R1, R2] [W0, W1]);
+impl_system!(system_r4w2 [R0, R1, R2, R3] [W0, W1]);
+impl_system!(system_r5w2 [R0, R1, R2, R3, R4] [W0, W1]);
+impl_system!(system_r6w2 [R0, R1, R2, R3, R4, R5] [W0, W1]);
+impl_system!(system_r1w3 [R0] [W0, W1, W2]);
+impl_system!(system_r2w3 [R0, R1] [W0, W1, W2]);
+impl_system!(system_r3w3 [R0, R1, R2] [W0, W1, W2]);
+impl_system!(system_r4w3 [R0, R1, R2, R3] [W0, W1, W2]);
+impl_system!(system_r5w3 [R0, R1, R2, R3, R4] [W0, W1, W2]);
+impl_system!(system_r6w3 [R0, R1, R2, R3, R4, R5] [W0, W1, W2]);
 
 struct SystemBatchIter<'a> {
     v: &'a mut [Box<System>]

@@ -449,7 +449,6 @@ mod tests {
         map.add(c.index(), 4);
 
         iter_entities_r1w1(map, vec, |iter, m, v| {
-            vec.get(a.index());
             for e in iter {
                 let x = unsafe { v.get_unchecked_mut(e) };
                 *x += *m.get(e).unwrap();
