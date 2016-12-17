@@ -89,6 +89,13 @@ impl Entities {
         self.allocated.load(Ordering::Relaxed)
     }
 
+    pub fn by_index(&self, index: Index) -> Entity {
+        match self.generations.get(index as usize) {
+            Some(&g) => Entity::new(index, g),
+            None     => Entity::new(index, 0)
+        }
+    }
+
     pub fn transaction(&self) -> EntitiesTransaction {
         EntitiesTransaction {
             entities: self,
@@ -147,6 +154,10 @@ impl<'a> EntitiesTransaction<'a> {
 
     pub fn is_alive(&self, entity: &Entity) -> bool {
         self.entities.is_alive(entity)
+    }
+
+    pub fn by_index(&self, index: Index) -> Entity {
+        self.entities.by_index(index)
     }
 
     pub fn to_change_set(self) -> EntityChangeSet {

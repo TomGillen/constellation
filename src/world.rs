@@ -1,51 +1,14 @@
 use std::ops::{Deref, DerefMut};
 use std::any::TypeId;
 use std::collections::HashMap;
-use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
-use std::marker::PhantomData;
+use std::sync::RwLock;
 use std::mem;
-use mopa::Any;
+
 use rayon::prelude::*;
 use arrayvec::ArrayVec;
-use entities::{Entities, EntitiesTransaction, EntityChangeSet};
 
-pub trait Resource : Any + Send + Sync { }
-
-mopafy!(Resource);
-
-pub struct ResourceReadGuard<'a, T: Resource> {
-    phantom: PhantomData<T>,
-    guard: RwLockReadGuard<'a, Box<Resource>>
-}
-
-impl<'a, T: Resource> Deref for ResourceReadGuard<'a, T> {
-    type Target = T;
-
-    fn deref(&self) -> &T {
-        let boxed = self.guard.deref();
-        unsafe { &boxed.deref().downcast_ref_unchecked::<T>() }
-    }
-}
-
-pub struct ResourceWriteGuard<'a, T: Resource> {
-    phantom: PhantomData<T>,
-    guard: RwLockWriteGuard<'a, Box<Resource>>
-}
-
-impl<'a, T: Resource> Deref for ResourceWriteGuard<'a, T> {
-    type Target = T;
-
-    fn deref(&self) -> &T {
-        let boxed = self.guard.deref();
-        unsafe { &boxed.deref().downcast_ref_unchecked::<T>() }
-    }
-}
-
-impl<'a, T: Resource> DerefMut for ResourceWriteGuard<'a, T> {
-    fn deref_mut(&mut self) -> &mut T {
-        unsafe { self.guard.deref_mut().downcast_mut_unchecked::<T>() }
-    }
-}
+use entities::*;
+use resource::*;
 
 pub struct World {
     entities: Entities,
@@ -73,11 +36,7 @@ impl World {
         let type_id = TypeId::of::<T>();
         if let Some(&(id, ref resource)) = self.resources.get(&type_id) {
             let guard = resource.read().unwrap();
-            let resource = ResourceReadGuard::<T> {
-                phantom: PhantomData,
-                guard: guard
-            };
-
+            let resource = ResourceReadGuard::<T>::new(guard);
             return Some((id, resource));
         }
 
@@ -88,11 +47,7 @@ impl World {
         let type_id = TypeId::of::<T>();
         if let Some(&(id, ref resource)) = self.resources.get(&type_id) {
             let guard = resource.write().unwrap();
-            let resource = ResourceWriteGuard::<T> {
-                phantom: PhantomData,
-                guard: guard
-            };
-
+            let resource = ResourceWriteGuard::<T>::new(guard);
             return Some((id, resource));
         }
 
@@ -284,6 +239,7 @@ impl<'a> Iterator for SystemBatchIter<'a> {
 mod tests {
     use super::*;
     use entities::*;
+    use resource::*;
     use std::collections::HashSet;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
