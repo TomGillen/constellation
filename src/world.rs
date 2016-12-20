@@ -1,10 +1,10 @@
 use std::ops::{Deref, DerefMut};
 use std::any::TypeId;
-use std::collections::HashMap;
 use std::sync::RwLock;
 use std::mem;
 
 use rayon::prelude::*;
+use fnv::FnvHashMap;
 use arrayvec::ArrayVec;
 
 use entities::*;
@@ -12,76 +12,106 @@ use resource::*;
 
 pub struct World {
     entities: Entities,
-    resources: HashMap<TypeId, (u8, RwLock<Box<Resource>>)>
+    resources: FnvHashMap<TypeId, (u8, RwLock<BoxedResource>)>,
+    entity_resources: Vec<TypeId>,
+    changes_buffer: Option<Vec<EntityChangeSet>>
 }
 
 impl World {
     pub fn new() -> World {
         World {
             entities: Entities::new(),
-            resources: HashMap::new()
+            resources: FnvHashMap::default(),
+            entity_resources: Vec::new(),
+            changes_buffer: Some(Vec::new())
         }
     }
 
     pub fn register_resource<T: Resource>(&mut self, resource: T) -> u8 {
         let type_id = TypeId::of::<T>();
-        let boxed = Box::new(resource) as Box<Resource>;
+        let boxed = BoxedResource::Resource(Box::new(resource) as Box<Resource>);
         let id = self.resources.len() as u8;
         let value = (id, RwLock::new(boxed));
         self.resources.insert(type_id, value);
         id
     }
 
-    pub fn get_resource<T: Resource>(&self) -> Option<(u8, ResourceReadGuard<T>)> {
+    pub fn register_entity_resource<T: EntityResource>(&mut self, resource: T) -> u8 {
+        let type_id = TypeId::of::<T>();
+        let boxed = BoxedResource::EntityResource(Box::new(resource) as Box<StoresEntityData>);
+        let id = self.resources.len() as u8;
+        let value = (id, RwLock::new(boxed));
+        self.resources.insert(type_id, value);
+        self.entity_resources.push(type_id);
+        id
+    }
+
+    fn get_resource<T: Resource>(&self) -> Option<(u8, ResourceReadGuard<T>)> {
         let type_id = TypeId::of::<T>();
         if let Some(&(id, ref resource)) = self.resources.get(&type_id) {
             let guard = resource.read().unwrap();
             let resource = ResourceReadGuard::<T>::new(guard);
             return Some((id, resource));
         }
-
         return None;
     }
 
-    pub fn get_resource_mut<T: Resource>(&self) -> Option<(u8, ResourceWriteGuard<T>)> {
+    fn get_resource_mut<T: Resource>(&self) -> Option<(u8, ResourceWriteGuard<T>)> {
         let type_id = TypeId::of::<T>();
         if let Some(&(id, ref resource)) = self.resources.get(&type_id) {
             let guard = resource.write().unwrap();
             let resource = ResourceWriteGuard::<T>::new(guard);
             return Some((id, resource));
         }
-
         return None;
     }
 
-    pub fn get_resource_id<T: Resource>(&self) -> Option<u8> {
+    fn get_resource_id<T: Resource>(&self) -> Option<u8> {
         let type_id = TypeId::of::<T>();
         if let Some(&(id, _)) = self.resources.get(&type_id) {
             return Some(id);
         }
-
         return None;
     }
 
-    pub fn update(&mut self, systems: &mut Vec<Box<System>>) {
-        let mut changes: Vec<EntityChangeSet> = Vec::new();
+    pub fn update(&mut self, systems: &mut [Box<System>]) {
+        let mut changes = mem::replace(&mut self.changes_buffer, None).unwrap();
         for batch in SystemBatchIter::new(systems) {
             let additional = batch.len() - changes.len();
-            changes.reserve(additional);
+            if additional > 0 {
+                changes.reserve(additional);
+            }
 
             batch.par_iter_mut()
                 .weight_max()
                 .map(|system| system.execute(self))
                 .collect_into(&mut changes);
 
+            self.clean_deleted_entities(&changes);
             self.entities.merge(changes.drain(..));
+        }
+
+        self.changes_buffer = Some(changes);
+    }
+
+    pub fn update_sequential(&mut self, systems: &mut [Box<System>]) {
+        for mut system in systems.iter_mut() {
+            let changes = [system.execute(self)];
+            self.clean_deleted_entities(&changes);
+            self.entities.merge(ArrayVec::from(changes).into_iter());
         }
     }
 
-    pub fn update_sequential(&mut self, systems: &mut Vec<Box<System>>) {
-        for mut system in systems.iter_mut() {
-            let changes = system.execute(self);
-            self.entities.merge(ArrayVec::from([changes]).into_iter());
+    fn clean_deleted_entities(&mut self, changes: &[EntityChangeSet]) {
+        for id in self.entity_resources.iter() {
+            let &mut (_, ref mut lock) = self.resources.get_mut(&id).unwrap();
+            let mut guard = lock.write().unwrap();
+            let resource = guard.deref_mut();
+            if let &mut BoxedResource::EntityResource(ref mut boxed) = resource {
+                for cs in changes.iter() {
+                    boxed.clear(&cs.deleted);
+                }
+            }
         }
     }
 }
@@ -109,47 +139,51 @@ impl<T: FnMut(&World) -> EntityChangeSet + Send> System for FnSystem<T> {
     }
 }
 
-pub fn system<F>(mut f: F) -> Box<System>
-    where F: FnMut(&mut EntitiesTransaction) + Send + 'static
-{
-    let system = move |world: &World| {
-        let mut tx = world.entities.transaction();
-        f(&mut tx);
-        tx.to_change_set()
-    };
+impl World {
+    pub fn system<F>(&self, mut f: F) -> Box<System>
+        where F: FnMut(&mut EntitiesTransaction) + Send + 'static
+    {
+        let system = move |world: &World| {
+            let mut tx = world.entities.transaction();
+            f(&mut tx);
+            tx.to_change_set()
+        };
 
-    Box::new(FnSystem {
-        read: 0,
-        write: 0,
-        f: system
-    })
+        Box::new(FnSystem {
+            read: 0,
+            write: 0,
+            f: system
+        })
+    }
 }
 
 macro_rules! impl_system {
     ($name:ident [$($read:ident),*] [$($write:ident),*]) => (
-        #[allow(non_snake_case, unused_variables)]
-        pub fn $name<$($read,)* $($write,)* F>(world: &World, mut f: F) -> Box<System>
-            where $($read:Resource,)*
-                  $($write:Resource,)*
-                  F: for<'a, 'b> FnMut(&'a mut EntitiesTransaction<'b>, $(&'b $read,)* $(&'b mut $write,)*) + Send + 'static
-        {
-            let system = move |world: &World| {
-                $(let (_, $read) = world.get_resource::<$read>().unwrap();)*
-                $(let (_, mut $write) = world.get_resource_mut::<$write>().unwrap();)*
+        impl World {
+            #[allow(non_snake_case, unused_variables)]
+            pub fn $name<$($read,)* $($write,)* F>(&self, mut f: F) -> Box<System>
+                where $($read:Resource,)*
+                      $($write:Resource,)*
+                      F: for<'a, 'b> FnMut(&'a mut EntitiesTransaction<'b>, $(&'b $read,)* $(&'b mut $write,)*) + Send + 'static
+            {
+                let system = move |world: &World| {
+                    $(let (_, $read) = world.get_resource::<$read>().unwrap();)*
+                    $(let (_, mut $write) = world.get_resource_mut::<$write>().unwrap();)*
 
-                let mut tx = world.entities.transaction();
-                f(&mut tx, $($read.deref(),)* $($write.deref_mut(),)*);
-                tx.to_change_set()
-            };
+                    let mut tx = world.entities.transaction();
+                    f(&mut tx, $($read.deref(),)* $($write.deref_mut(),)*);
+                    tx.to_change_set()
+                };
 
-            $(let $read = 1u64 << world.get_resource_id::<$read>().unwrap();)*
-            $(let $write = 1u64 << world.get_resource_id::<$write>().unwrap();)*
+                $(let $read = 1u64 << self.get_resource_id::<$read>().unwrap();)*
+                $(let $write = 1u64 << self.get_resource_id::<$write>().unwrap();)*
 
-            Box::new(FnSystem {
-                read: 0 $(| $write)* $(| $read)*,
-                write: 0 $(| $write)*,
-                f: system
-            })
+                Box::new(FnSystem {
+                    read: 0 $(| $write)* $(| $read)*,
+                    write: 0 $(| $write)*,
+                    f: system
+                })
+            }
         }
     )
 }
@@ -161,18 +195,21 @@ impl_system!(system_r3w0 [R0, R1, R2] []);
 impl_system!(system_r4w0 [R0, R1, R2, R3] []);
 impl_system!(system_r5w0 [R0, R1, R2, R3, R4] []);
 impl_system!(system_r6w0 [R0, R1, R2, R3, R4, R5] []);
+impl_system!(system_r0w1 [] [W0]);
 impl_system!(system_r1w1 [R0] [W0]);
 impl_system!(system_r2w1 [R0, R1] [W0]);
 impl_system!(system_r3w1 [R0, R1, R2] [W0]);
 impl_system!(system_r4w1 [R0, R1, R2, R3] [W0]);
 impl_system!(system_r5w1 [R0, R1, R2, R3, R4] [W0]);
 impl_system!(system_r6w1 [R0, R1, R2, R3, R4, R5] [W0]);
+impl_system!(system_r0w2 [] [W0, W1]);
 impl_system!(system_r1w2 [R0] [W0, W1]);
 impl_system!(system_r2w2 [R0, R1] [W0, W1]);
 impl_system!(system_r3w2 [R0, R1, R2] [W0, W1]);
 impl_system!(system_r4w2 [R0, R1, R2, R3] [W0, W1]);
 impl_system!(system_r5w2 [R0, R1, R2, R3, R4] [W0, W1]);
 impl_system!(system_r6w2 [R0, R1, R2, R3, R4, R5] [W0, W1]);
+impl_system!(system_r0w3 [] [W0, W1, W3]);
 impl_system!(system_r1w3 [R0] [W0, W1, W2]);
 impl_system!(system_r2w3 [R0, R1] [W0, W1, W2]);
 impl_system!(system_r3w3 [R0, R1, R2] [W0, W1, W2]);
@@ -308,7 +345,8 @@ mod tests {
 
     #[test]
     fn create_fn_system() {
-        system(|_| {});
+        let world = World::new();
+        world.system(|_| {});
     }
 
     #[test]
@@ -318,7 +356,7 @@ mod tests {
         let run_count = Arc::new(AtomicUsize::new(0));
 
         let run_count_clone = run_count.clone();
-        let system = system(move |_| { run_count_clone.fetch_add(1, Ordering::Relaxed); });
+        let system = world.system(move |_| { run_count_clone.fetch_add(1, Ordering::Relaxed); });
 
         world.update(&mut vec![system]);
 
@@ -332,13 +370,13 @@ mod tests {
         let run_count = Arc::new(AtomicUsize::new(0));
 
         let run_count_clone = run_count.clone();
-        let system1 = system(move |_| { run_count_clone.fetch_add(1, Ordering::Relaxed); });
+        let system1 = world.system(move |_| { run_count_clone.fetch_add(1, Ordering::Relaxed); });
 
         let run_count_clone = run_count.clone();
-        let system2 = system(move |_| { run_count_clone.fetch_add(1, Ordering::Relaxed); });
+        let system2 = world.system(move |_| { run_count_clone.fetch_add(1, Ordering::Relaxed); });
 
         let run_count_clone = run_count.clone();
-        let system3 = system(move |_| { run_count_clone.fetch_add(1, Ordering::Relaxed); });
+        let system3 = world.system(move |_| { run_count_clone.fetch_add(1, Ordering::Relaxed); });
 
         world.update(&mut vec![system1, system2, system3]);
 
@@ -351,20 +389,20 @@ mod tests {
         world.register_resource(TestResource { x: 1 });
         world.register_resource(TestResource2 {});
 
-        let reader = system_r1w0(&world, move |_, r: &TestResource| {
+        let reader = world.system_r1w0(move |_, r: &TestResource| {
             assert_eq!(r.x, 1);
         });
 
-        let reader2 = system_r1w0(&world, move |_, r: &TestResource| {
+        let reader2 = world.system_r1w0(move |_, r: &TestResource| {
             assert_eq!(r.x, 1);
         });
 
-        let writer = system_r1w1(&world, |_, _: &TestResource2, w: &mut TestResource| {
+        let writer = world.system_r1w1(|_, _: &TestResource2, w: &mut TestResource| {
             assert_eq!(w.x, 1);
             w.x = 2;
         });
 
-        let reader3 = system_r1w0(&world, move |_, r: &TestResource| {
+        let reader3 = world.system_r1w0(move |_, r: &TestResource| {
             assert_eq!(r.x, 2);
         });
 
@@ -377,20 +415,20 @@ mod tests {
         world.register_resource(TestResource { x: 1 });
         world.register_resource(TestResource2 {});
 
-        let reader = system_r1w0(&world, move |_, r: &TestResource| {
+        let reader = world.system_r1w0(move |_, r: &TestResource| {
             assert_eq!(r.x, 1);
         });
 
-        let reader2 = system_r1w0(&world, move |_, r: &TestResource| {
+        let reader2 = world.system_r1w0(move |_, r: &TestResource| {
             assert_eq!(r.x, 1);
         });
 
-        let writer = system_r1w1(&world, |_, _: &TestResource2, w: &mut TestResource| {
+        let writer = world.system_r1w1(|_, _: &TestResource2, w: &mut TestResource| {
             assert_eq!(w.x, 1);
             w.x = 2;
         });
 
-        let reader3 = system_r1w0(&world, move |_, r: &TestResource| {
+        let reader3 = world.system_r1w0(move |_, r: &TestResource| {
             assert_eq!(r.x, 2);
         });
 
@@ -624,9 +662,65 @@ mod tests {
         let r1_key = world.register_resource(TestResource { x: 1 });
         let r2_key = world.register_resource(TestResource2 {});
 
-        let s = system_r1w1(&world, |_, _: &TestResource, _: &mut TestResource2| {});
+        let s = world.system_r1w1(|_, _: &TestResource, _: &mut TestResource2| {});
 
         let expected = ((1 << r1_key) | (1 << r2_key), 1 << r2_key);
         assert_eq!(s.resource_key(), expected);
+    }
+
+    #[test]
+    fn clean_deleted_entities() {
+        let mut world = World::new();
+        world.register_entity_resource(VecResource::<u32>::new());
+
+        let init = world.system_r0w1(|tx, resource: &mut VecResource<u32>| {
+            println!("Creating entities");
+            for i in 0..1000 {
+                let e = tx.create();
+                resource.add(e.index(), i);
+            }
+            println!("Entities created");
+        });
+
+        let verify_init = world.system_r1w0(|_, resource: &VecResource<u32>| {
+            println!("Verifying entity creation");
+            iter_entities_r1w0(resource, |iter, r| {
+                for e in iter {
+                    assert_eq!(e, *r.get(e).unwrap());
+                }
+            });
+            println!("Verified entity creation");
+        });
+
+        let delete = world.system_r0w1(|tx, resource: &mut VecResource<u32>| {
+            println!("Deleting entities");
+            let mut entities = Vec::<Index>::new();
+            iter_entities_r1w0(resource, |iter, _| {
+                for e in iter {
+                    entities.push(e);
+                }
+            });
+
+            for e in entities {
+                let entity = tx.by_index(e);
+                tx.destroy(entity);
+            }
+            println!("Deleted entities");
+        });
+
+        let verify_delete = world.system_r1w0(|_, resource: &VecResource<u32>| {
+            println!("Verifying entity deletion");
+            let mut entities = Vec::<Index>::new();
+            iter_entities_r1w0(resource, |iter, _| {
+                for e in iter {
+                    entities.push(e);
+                }
+            });
+
+            assert_eq!(entities.len(), 0);
+            println!("Verified entity delection");
+        });
+
+        world.update(&mut vec![init, verify_init, delete, verify_delete]);
     }
 }

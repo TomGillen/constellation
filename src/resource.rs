@@ -1,5 +1,4 @@
 use std::ops::{Deref, DerefMut};
-use std::collections::HashMap;
 use std::collections::hash_map;
 use std::collections::hash_map::{Values, ValuesMut};
 use std::slice;
@@ -7,6 +6,7 @@ use std::sync::{RwLockReadGuard, RwLockWriteGuard};
 use std::marker::PhantomData;
 
 use mopa::Any;
+use fnv::FnvHashMap;
 
 use entities::*;
 use bitset::*;
@@ -15,22 +15,50 @@ use join::*;
 pub trait Resource : Any + Send + Sync { }
 mopafy!(Resource);
 
-pub trait EntityResource : Resource {
-    type Filter: BitSetLike;
+pub trait StoresEntityData : Send + Sync {
+    fn clear(&mut self, &[Index]);
+}
+//mopafy!(StoresEntityData);
+
+impl StoresEntityData {
+    /// Returns a reference to the boxed value, blindly assuming it to be of type `T`.
+    /// If you are not *absolutely certain* of `T`, you *must not* call this.
+    #[inline]
+    pub unsafe fn downcast_ref_unsafe<T>(&self) -> &T {
+        &*(self as *const Self as *const T)
+    }
+
+    /// Returns a reference to the boxed value, blindly assuming it to be of type `T`.
+    /// If you are not *absolutely certain* of `T`, you *must not* call this.
+    #[inline]
+    pub unsafe fn downcast_mut_unsafe<T>(&mut self) -> &mut T {
+        &mut *(self as *mut Self as *mut T)
+    }
+}
+
+pub trait EntityResource : Resource + StoresEntityData {
+    //type Filter: BitSetLike;
     type Api;
 
-    fn deconstruct(&self) -> (&Self::Filter, &Self::Api);
-    fn deconstruct_mut(&mut self) -> (&Self::Filter, &mut Self::Api);
-    fn clear(&mut self, &[Entity]);
+    // fn deconstruct(&self) -> (&Self::Filter, &Self::Api);
+    // fn deconstruct_mut(&mut self) -> (&Self::Filter, &mut Self::Api);
+
+    fn deconstruct(&self) -> (&BitSet, &Self::Api);
+    fn deconstruct_mut(&mut self) -> (&BitSet, &mut Self::Api);
+}
+
+pub enum BoxedResource {
+    Resource(Box<Resource>),
+    EntityResource(Box<StoresEntityData>)
 }
 
 pub struct ResourceReadGuard<'a, T: Resource> {
     phantom: PhantomData<T>,
-    guard: RwLockReadGuard<'a, Box<Resource>>
+    guard: RwLockReadGuard<'a, BoxedResource>
 }
 
 impl<'a, T: Resource> ResourceReadGuard<'a, T> {
-    pub fn new(guard: RwLockReadGuard<'a, Box<Resource>>) -> ResourceReadGuard<'a, T> {
+    pub fn new(guard: RwLockReadGuard<'a, BoxedResource>) -> ResourceReadGuard<'a, T> {
         ResourceReadGuard {
             phantom: PhantomData,
             guard: guard
@@ -43,17 +71,20 @@ impl<'a, T: Resource> Deref for ResourceReadGuard<'a, T> {
 
     fn deref(&self) -> &T {
         let boxed = self.guard.deref();
-        unsafe { &boxed.deref().downcast_ref_unchecked::<T>() }
+        match boxed {
+            &BoxedResource::Resource(ref res) => unsafe { res.downcast_ref_unchecked::<T>() },
+            &BoxedResource::EntityResource(ref res) => unsafe { res.downcast_ref_unsafe::<T>() }
+        }
     }
 }
 
 pub struct ResourceWriteGuard<'a, T: Resource> {
     phantom: PhantomData<T>,
-    guard: RwLockWriteGuard<'a, Box<Resource>>
+    guard: RwLockWriteGuard<'a, BoxedResource>
 }
 
 impl<'a, T: Resource> ResourceWriteGuard<'a, T> {
-    pub fn new(guard: RwLockWriteGuard<'a, Box<Resource>>) -> ResourceWriteGuard<'a, T> {
+    pub fn new(guard: RwLockWriteGuard<'a, BoxedResource>) -> ResourceWriteGuard<'a, T> {
         ResourceWriteGuard {
             phantom: PhantomData,
             guard: guard
@@ -66,33 +97,79 @@ impl<'a, T: Resource> Deref for ResourceWriteGuard<'a, T> {
 
     fn deref(&self) -> &T {
         let boxed = self.guard.deref();
-        unsafe { &boxed.deref().downcast_ref_unchecked::<T>() }
+        match boxed {
+            &BoxedResource::Resource(ref res) => unsafe { res.downcast_ref_unchecked::<T>() },
+            &BoxedResource::EntityResource(ref res) => unsafe { res.downcast_ref_unsafe::<T>() }
+        }
     }
 }
 
 impl<'a, T: Resource> DerefMut for ResourceWriteGuard<'a, T> {
     fn deref_mut(&mut self) -> &mut T {
-        unsafe { self.guard.deref_mut().downcast_mut_unchecked::<T>() }
+        //unsafe { self.guard.deref_mut().downcast_mut_unchecked::<T>() }
+        let boxed = self.guard.deref_mut();
+        match boxed {
+            &mut BoxedResource::Resource(ref mut res) => unsafe { res.downcast_mut_unchecked::<T>() },
+            &mut BoxedResource::EntityResource(ref mut res) => unsafe { res.downcast_mut_unsafe::<T>() }
+        }
     }
 }
 
-pub fn iter_entities_r1w1<'a, R1, W1, F>(r1: &R1, w1: &mut W1, f: F)
-    where R1: EntityResource,
-          W1: EntityResource,
-          F: FnOnce(BitIter<BitSetAnd<&<R1 as EntityResource>::Filter, &<W1 as EntityResource>::Filter>>, &R1::Api, &mut W1::Api) + 'a
-{
-    let (r1_filter, r1_api) = r1.deconstruct();
-    let (w1_filter, w1_api) = w1.deconstruct_mut();
-    let iter = (r1_filter, w1_filter).and().iter();
-    f(iter, r1_api, w1_api);
+macro_rules! impl_iter_entities {
+    ($name:ident [$($read:ident),*] [$($write:ident),*] [$iter:ty]) => (
+        #[allow(non_snake_case)]
+        pub fn $name<'a, $($read,)* $($write,)* F, R>($($read: &$read,)* $($write: &mut $write,)* f: F) -> R
+            where $($read:EntityResource,)*
+                  $($write:EntityResource,)*
+                  F: FnOnce($iter, $(&$read::Api,)* $(&mut $write::Api,)*) -> R + 'a
+        {
+            $(let $read = $read.deconstruct();)*
+            $(let $write = $write.deconstruct_mut();)*
+            let iter = ($($read.0,)* $($write.0,)*).and().iter();
+
+            f(iter, $($read.1,)* $($write.1,)*)
+        }
+    )
 }
+
+impl_iter_entities!(iter_entities_r0w1 [] [W0] [BitIter<&BitSet>]);
+impl_iter_entities!(iter_entities_r0w2 [] [W0, W1] [BitIter<BitSetAnd<&BitSet, &BitSet>>]);
+impl_iter_entities!(iter_entities_r0w3 [] [W0, W1, W2] [BitIter<BitSetAnd<&BitSet, BitSetAnd<&BitSet, &BitSet>>>]);
+impl_iter_entities!(iter_entities_r1w0 [R0] [] [BitIter<&BitSet>]);
+impl_iter_entities!(iter_entities_r1w1 [R0] [W0] [BitIter<BitSetAnd<&BitSet, &BitSet>>]);
+impl_iter_entities!(iter_entities_r1w2 [R0] [W0, W1] [BitIter<BitSetAnd<&BitSet, BitSetAnd<&BitSet, &BitSet>>>]);
+impl_iter_entities!(iter_entities_r1w3 [R0] [W0, W1, W3] [BitIter<BitSetAnd<BitSetAnd<&BitSet, &BitSet>, BitSetAnd<&BitSet, &BitSet>>>]);
+impl_iter_entities!(iter_entities_r2w0 [R0, R1] [] [BitIter<BitSetAnd<&BitSet, &BitSet>>]);
+impl_iter_entities!(iter_entities_r2w1 [R0, R1] [W0] [BitIter<BitSetAnd<&BitSet, BitSetAnd<&BitSet, &BitSet>>>]);
+impl_iter_entities!(iter_entities_r2w2 [R0, R1] [W0, W1] [BitIter<BitSetAnd<BitSetAnd<&BitSet, &BitSet>, BitSetAnd<&BitSet, &BitSet>>>]);
+impl_iter_entities!(iter_entities_r2w3 [R0, R1] [W0, W1, W3] [BitIter<BitSetAnd<BitSetAnd<&BitSet, &BitSet>, BitSetAnd<&BitSet, BitSetAnd<&BitSet, &BitSet>>>>]);
+impl_iter_entities!(iter_entities_r3w0 [R0, R1, R2] [] [BitIter<BitSetAnd<&BitSet, BitSetAnd<&BitSet, &BitSet>>>]);
+impl_iter_entities!(iter_entities_r3w1 [R0, R1, R2] [W1] [BitIter<BitSetAnd<BitSetAnd<&BitSet, &BitSet>, BitSetAnd<&BitSet, &BitSet>>>]);
+impl_iter_entities!(iter_entities_r3w2 [R0, R1, R2] [W1, W2] [BitIter<BitSetAnd<BitSetAnd<&BitSet, &BitSet>, BitSetAnd<&BitSet, BitSetAnd<&BitSet, &BitSet>>>>]);
+impl_iter_entities!(iter_entities_r3w3 [R0, R1, R2] [W1, W2, W3] [BitIter<BitSetAnd<BitSetAnd<&BitSet, BitSetAnd<&BitSet, &BitSet>>, BitSetAnd<&BitSet, BitSetAnd<&BitSet, &BitSet>>>>]);
+impl_iter_entities!(iter_entities_r4w0 [R0, R1, R2, R3] [] [BitIter<BitSetAnd<BitSetAnd<&BitSet, &BitSet>, BitSetAnd<&BitSet, &BitSet>>>]);
+impl_iter_entities!(iter_entities_r4w1 [R0, R1, R2, R3] [W1] [BitIter<BitSetAnd<BitSetAnd<&BitSet, &BitSet>, BitSetAnd<&BitSet, BitSetAnd<&BitSet, &BitSet>>>>]);
+impl_iter_entities!(iter_entities_r4w2 [R0, R1, R2, R3] [W1, W2] [BitIter<BitSetAnd<BitSetAnd<&BitSet, BitSetAnd<&BitSet, &BitSet>>, BitSetAnd<&BitSet, BitSetAnd<&BitSet, &BitSet>>>>]);
+impl_iter_entities!(iter_entities_r4w3 [R0, R1, R2, R3] [W1, W2, W3] [BitIter<BitSetAnd<BitSetAnd<&BitSet, BitSetAnd<&BitSet, &BitSet>>, BitSetAnd<BitSetAnd<&BitSet, &BitSet>, BitSetAnd<&BitSet, &BitSet>>>>]);
+
+// todo: find out why the compiler gets confused when using associated types in the FnOnce with iter_entities for the iterator and BitSet
+// solving this would eliminate the need to provide the iterator type in the macro invokations, and allow EntityResources to specify alternate BitSetLike filters via associated types
+
+// pub fn iter_entities_r1w1<'a, R1, W1, F>(r1: &R1, w1: &mut W1, f: F)
+//     where R1: EntityResource,
+//           W1: EntityResource,
+//           F: FnOnce(BitIter<<(&R1::Filter, &W1::Filter) as BitAnd>::Value>, &R1::Api, &mut W1::Api) + 'a
+// {
+//     let (r1_filter, r1_api) = r1.deconstruct();
+//     let (w1_filter, w1_api) = w1.deconstruct_mut();
+//     let iter = (r1_filter, w1_filter).and().iter();
+//     f(iter, r1_api, w1_api);
+// }
 
 pub struct MapResource<T: Any + Send + Sync> {
     filter: BitSet,
     storage: MapStorage<T>
 }
-
-impl<T: Any + Send + Sync> Resource for MapResource<T> { }
 
 impl<T: Any + Send + Sync> MapResource<T> {
     pub fn new() -> MapResource<T> {
@@ -117,8 +194,10 @@ impl<T: Any + Send + Sync> MapResource<T> {
     }
 }
 
+impl<T: Any + Send + Sync> Resource for MapResource<T> { }
+
 impl<T: Any + Send + Sync> EntityResource for MapResource<T> {
-    type Filter = BitSet;
+    //type Filter = BitSet;
     type Api = MapStorage<T>;
 
     fn deconstruct(&self) -> (&BitSet, &MapStorage<T>) {
@@ -128,10 +207,12 @@ impl<T: Any + Send + Sync> EntityResource for MapResource<T> {
     fn deconstruct_mut(&mut self) -> (&BitSet, &mut MapStorage<T>) {
         (&self.filter, &mut self.storage)
     }
+}
 
-    fn clear(&mut self, entities: &[Entity]) {
+impl<T: Any + Send + Sync> StoresEntityData for MapResource<T> {
+    fn clear(&mut self, entities: &[Index]) {
         for entity in entities {
-            self.remove(entity.index());
+            self.remove(*entity);
         }
     }
 }
@@ -151,13 +232,13 @@ impl<T: Any + Send + Sync> DerefMut for MapResource<T> {
 }
 
 pub struct MapStorage<T> {
-    m: HashMap<Index, T>
+    m: FnvHashMap<Index, T>
 }
 
 impl<T> MapStorage<T> {
     pub fn new() -> MapStorage<T> {
         MapStorage {
-            m: HashMap::new()
+            m: FnvHashMap::default()
         }
     }
 
@@ -218,7 +299,7 @@ impl<T: Any + Send + Sync> VecResource<T> {
 
     pub fn remove(&mut self, entity: Index) -> Option<T> {
         let index = entity as usize;
-        if self.storage.v.len() >= index {
+        if self.storage.v.len() <= index {
             return None;
         }
 
@@ -233,7 +314,7 @@ impl<T: Any + Send + Sync> VecResource<T> {
 }
 
 impl<T: Any + Send + Sync> EntityResource for VecResource<T> {
-    type Filter = BitSet;
+    //type Filter = BitSet;
     type Api = VecStorage<T>;
 
     fn deconstruct(&self) -> (&BitSet, &VecStorage<T>) {
@@ -243,10 +324,12 @@ impl<T: Any + Send + Sync> EntityResource for VecResource<T> {
     fn deconstruct_mut(&mut self) -> (&BitSet, &mut VecStorage<T>) {
         (&self.filter, &mut self.storage)
     }
+}
 
-    fn clear(&mut self, entities: &[Entity]) {
+impl<T: Any + Send + Sync> StoresEntityData for VecResource<T> {
+    fn clear(&mut self, entities: &[Index]) {
         for entity in entities {
-            self.remove(entity.index());
+            self.remove(*entity);
         }
     }
 }
