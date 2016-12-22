@@ -1,9 +1,8 @@
 use std::collections::HashSet;
 use std::ops::{Deref, DerefMut};
 use std::any::TypeId;
-use std::cell::{RefCell, Ref, RefMut};
+use std::cell::UnsafeCell;
 use std::mem;
-use std::marker::PhantomData;
 
 use rayon::prelude::*;
 use fnv::FnvHashMap;
@@ -14,9 +13,14 @@ use resource::*;
 
 pub struct World {
     entities: Entities,
-    resources: FnvHashMap<TypeId, (u8, RefCell<BoxedResource>)>,
+    resources: FnvHashMap<TypeId, (u8, UnsafeCell<BoxedResource>)>,
     entity_resources: Vec<TypeId>,
     changes_buffer: Option<Vec<EntityChangeSet>>
+}
+
+enum BoxedResource {
+    Resource(Box<Resource>),
+    EntityResource(Box<StoresEntityData>)
 }
 
 // resource access is ensured safe by the system scheduler
@@ -36,7 +40,7 @@ impl World {
         let type_id = TypeId::of::<T>();
         let boxed = BoxedResource::Resource(Box::new(resource) as Box<Resource>);
         let id = self.resources.len() as u8;
-        let value = (id, RefCell::new(boxed));
+        let value = (id, UnsafeCell::new(boxed));
         self.resources.insert(type_id, value);
         id
     }
@@ -45,29 +49,35 @@ impl World {
         let type_id = TypeId::of::<T>();
         let boxed = BoxedResource::EntityResource(Box::new(resource) as Box<StoresEntityData>);
         let id = self.resources.len() as u8;
-        let value = (id, RefCell::new(boxed));
+        let value = (id, UnsafeCell::new(boxed));
         self.resources.insert(type_id, value);
         self.entity_resources.push(type_id);
         id
     }
 
     // Can only be safely called from within a system, and only for the resources the system declares
-    fn get_resource<T: Resource>(&self) -> Option<(u8, ResourceRef<T>)> {
+    fn get_resource<T: Resource>(&self) -> Option<(u8, &T)> {
         let type_id = TypeId::of::<T>();
         if let Some(&(id, ref resource)) = self.resources.get(&type_id) {
-            let borrow = resource.borrow();
-            let resource = ResourceRef::<T>::new(borrow);
+            let borrow = unsafe { &*resource.get() };
+            let resource = match borrow {
+                &BoxedResource::Resource(ref res) => unsafe { res.downcast_ref_unsafe::<T>() },
+                &BoxedResource::EntityResource(ref res) => unsafe { res.downcast_ref_unsafe::<T>() }
+            };
             return Some((id, resource));
         }
         return None;
     }
 
     // Can only be safely called from within a system, and only for the resources the system declares
-    fn get_resource_mut<T: Resource>(&self) -> Option<(u8, ResourceRefMut<T>)> {
+    fn get_resource_mut<T: Resource>(&self) -> Option<(u8, &mut T)> {
         let type_id = TypeId::of::<T>();
         if let Some(&(id, ref resource)) = self.resources.get(&type_id) {
-            let borrow = resource.borrow_mut();
-            let resource = ResourceRefMut::<T>::new(borrow);
+            let borrow = unsafe { &mut *resource.get() };
+            let resource = match borrow {
+                &mut BoxedResource::Resource(ref mut res) => unsafe { res.downcast_mut_unsafe::<T>() },
+                &mut BoxedResource::EntityResource(ref mut res) => unsafe { res.downcast_mut_unsafe::<T>() }
+            };
             return Some((id, resource));
         }
         return None;
@@ -76,7 +86,7 @@ impl World {
     fn clean_deleted_entities(&mut self, changes: &[EntityChangeSet]) {
         for id in self.entity_resources.iter() {
             let &mut (_, ref mut cell) = self.resources.get_mut(&id).unwrap();
-            let resource: &mut BoxedResource = &mut cell.borrow_mut();
+            let resource: &mut BoxedResource = unsafe { &mut *cell.get() };
             if let &mut BoxedResource::EntityResource(ref mut boxed) = resource {
                 for cs in changes.iter() {
                     boxed.clear(&cs.deleted);
@@ -86,86 +96,25 @@ impl World {
     }
 }
 
-enum BoxedResource {
-    Resource(Box<Resource>),
-    EntityResource(Box<StoresEntityData>)
-}
-
-struct ResourceRef<'a, T: Resource> {
-    phantom: PhantomData<T>,
-    guard: Ref<'a, BoxedResource>
-}
-
-impl<'a, T: Resource> ResourceRef<'a, T> {
-    pub fn new(guard: Ref<'a, BoxedResource>) -> ResourceRef<'a, T> {
-        ResourceRef {
-            phantom: PhantomData,
-            guard: guard
-        }
-    }
-}
-
-impl<'a, T: Resource> Deref for ResourceRef<'a, T> {
-    type Target = T;
-
-    fn deref(&self) -> &T {
-        let boxed = self.guard.deref();
-        match boxed {
-            &BoxedResource::Resource(ref res) => unsafe { res.downcast_ref_unchecked::<T>() },
-            &BoxedResource::EntityResource(ref res) => unsafe { res.downcast_ref_unsafe::<T>() }
-        }
-    }
-}
-
-struct ResourceRefMut<'a, T: Resource> {
-    phantom: PhantomData<T>,
-    guard: RefMut<'a, BoxedResource>
-}
-
-impl<'a, T: Resource> ResourceRefMut<'a, T> {
-    pub fn new(guard: RefMut<'a, BoxedResource>) -> ResourceRefMut<'a, T> {
-        ResourceRefMut {
-            phantom: PhantomData,
-            guard: guard
-        }
-    }
-}
-
-impl<'a, T: Resource> Deref for ResourceRefMut<'a, T> {
-    type Target = T;
-
-    fn deref(&self) -> &T {
-        let boxed = self.guard.deref();
-        match boxed {
-            &BoxedResource::Resource(ref res) => unsafe { res.downcast_ref_unchecked::<T>() },
-            &BoxedResource::EntityResource(ref res) => unsafe { res.downcast_ref_unsafe::<T>() }
-        }
-    }
-}
-
-impl<'a, T: Resource> DerefMut for ResourceRefMut<'a, T> {
-    fn deref_mut(&mut self) -> &mut T {
-        //unsafe { self.guard.deref_mut().downcast_mut_unchecked::<T>() }
-        let boxed = self.guard.deref_mut();
-        match boxed {
-            &mut BoxedResource::Resource(ref mut res) => unsafe { res.downcast_mut_unchecked::<T>() },
-            &mut BoxedResource::EntityResource(ref mut res) => unsafe { res.downcast_mut_unsafe::<T>() }
-        }
-    }
-}
-
 trait System : Send {
+    fn id(&self) -> u32;
     fn resource_access(&self) -> (&HashSet<TypeId>, &HashSet<TypeId>);
     fn execute(&mut self, &World) -> EntityChangeSet;
 }
 
 struct FnSystem<T: FnMut(&World) -> EntityChangeSet + Send> {
+    id: u32,
     read: HashSet<TypeId>,
     write: HashSet<TypeId>,
     f: T
 }
 
 impl<T: FnMut(&World) -> EntityChangeSet + Send> System for FnSystem<T> {
+    #[inline]
+    fn id(&self) -> u32 {
+        self.id
+    }
+
     #[inline]
     fn resource_access(&self) -> (&HashSet<TypeId>, &HashSet<TypeId>) {
         (&self.read, &self.write)
@@ -192,11 +141,11 @@ impl SystemCommandBuffer {
         }
     }
 
-    pub fn queue_systems<'a, F>(&mut self, f: F)
-        where F: FnOnce(&mut SystemScope) + 'a
+    pub fn queue_systems<'a, F, R>(&mut self, f: F) -> R
+        where F: FnOnce(&mut SystemScope) -> R + 'a
     {
         let mut scope = SystemScope::new();
-        f(&mut scope);
+        let result = f(&mut scope);
 
         let mut reading = HashSet::<TypeId>::new();
         let mut writing = HashSet::<TypeId>::new();
@@ -220,6 +169,8 @@ impl SystemCommandBuffer {
         if batch.len() > 0 {
             self.batches.push(batch);
         }
+
+        result
     }
 }
 
@@ -241,7 +192,7 @@ macro_rules! impl_run_system {
     ($name:ident [$($read:ident),*] [$($write:ident),*]) => (
         impl SystemScope {
             #[allow(non_snake_case, unused_variables, unused_mut)]
-            pub fn $name<$($read,)* $($write,)* F>(&mut self, mut f: F)
+            pub fn $name<$($read,)* $($write,)* F>(&mut self, mut f: F) -> u32
                 where $($read:Resource,)*
                       $($write:Resource,)*
                       F: for<'a, 'b> FnMut(&'a mut EntitiesTransaction<'b>, $(&'b $read,)* $(&'b mut $write,)*) + Send + 'static
@@ -262,13 +213,16 @@ macro_rules! impl_run_system {
                 let mut write = HashSet::<TypeId>::new();
                 $(write.insert(TypeId::of::<$write>());)*
 
+                let id = self.systems.len() as u32;
                 let boxed = Box::new(FnSystem {
+                    id: id,
                     read: read,
                     write: write,
                     f: system
                 });
 
                 self.systems.push(boxed);
+                id
             }
         }
     )
@@ -499,28 +453,45 @@ mod tests {
 
     #[test]
     fn run_system_exclusive_write_parallel() {
-        let mut world = World::new();
-        world.register_resource(TestResource { x: 1 });
-        world.register_resource(TestResource2 {});
+        //for _ in 0..1000 {
+            let mut world = World::new();
+            world.register_resource(TestResource { x: 1 });
+            world.register_resource(TestResource2 {});
 
-        let mut buffer = SystemCommandBuffer::new();
-        buffer.queue_systems(|scope| {
-            scope.run_r1w0(move |_, r: &TestResource| {
-                assert_eq!(r.x, 1);
-            });
-            scope.run_r1w0(move |_, r: &TestResource| {
-                assert_eq!(r.x, 1);
-            });
-            scope.run_r1w1(|_, _: &TestResource2, w: &mut TestResource| {
-                assert_eq!(w.x, 1);
-                w.x = 2;
-            });
-            scope.run_r1w0(move |_, r: &TestResource| {
-                assert_eq!(r.x, 2);
-            });
-        });
+            let mut buffer = SystemCommandBuffer::new();
+            let (a, b, c, d) = buffer.queue_systems(|scope| {
+                let a = scope.run_r1w0(move |_, r: &TestResource| {
+                    println!("running a");
+                    assert_eq!(r.x, 1);
+                });
+                let b = scope.run_r1w0(move |_, r: &TestResource| {
+                    println!("running b");
+                    assert_eq!(r.x, 1);
+                });
+                let c = scope.run_r1w1(|_, _: &TestResource2, w: &mut TestResource| {
+                    println!("running c");
+                    assert_eq!(w.x, 1);
+                    w.x = 2;
+                });
+                let d = scope.run_r1w0(move |_, r: &TestResource| {
+                    println!("running d");
+                    assert_eq!(r.x, 2);
+                });
 
-        world.run(&mut buffer);
+                (a, b, c, d)
+            });
+
+            assert_eq!(buffer.batches.len(), 3);
+            assert_eq!(buffer.batches[0].len(), 2);
+            assert_eq!(buffer.batches[0][0].id(), a);
+            assert_eq!(buffer.batches[0][1].id(), b);
+            assert_eq!(buffer.batches[1].len(), 1);
+            assert_eq!(buffer.batches[1][0].id(), c);
+            assert_eq!(buffer.batches[2].len(), 1);
+            assert_eq!(buffer.batches[2][0].id(), d);
+
+            world.run(&mut buffer);
+        //}
     }
 
     #[test]
@@ -563,9 +534,9 @@ mod tests {
 
         assert_eq!(buffer.batches.len(), 1);
         assert_eq!(buffer.batches[0].len(), 3);
-        // assert_eq!(buffer.batches[0][0].resource_key(), (1u64, 1u64));
-        // assert_eq!(buffer.batches[0][1].resource_key(), (2u64, 2u64));
-        // assert_eq!(buffer.batches[0][2].resource_key(), (4u64, 4u64));
+        assert_eq!(buffer.batches[0][0].id(), 0);
+        assert_eq!(buffer.batches[0][1].id(), 1);
+        assert_eq!(buffer.batches[0][2].id(), 2);
     }
 
     #[test]
@@ -580,10 +551,10 @@ mod tests {
 
         assert_eq!(buffer.batches.len(), 2);
         assert_eq!(buffer.batches[0].len(), 2);
-        // assert_eq!(batches[0][0].resource_key(), (1u64, 1u64));
-        // assert_eq!(batches[0][1].resource_key(), (2u64, 2u64));
+        assert_eq!(buffer.batches[0][0].id(), 0);
+        assert_eq!(buffer.batches[0][1].id(), 1);
         assert_eq!(buffer.batches[1].len(), 1);
-        // assert_eq!(batches[1][0].resource_key(), (3u64, 3u64));
+        assert_eq!(buffer.batches[1][0].id(), 2);
     }
 
     #[test]
@@ -598,11 +569,11 @@ mod tests {
 
         assert_eq!(buffer.batches.len(), 3);
         assert_eq!(buffer.batches[0].len(), 1);
-        // assert_eq!(batches[0][0].resource_key(), (1u64, 1u64));
+        assert_eq!(buffer.batches[0][0].id(), 0);
         assert_eq!(buffer.batches[1].len(), 1);
-        // assert_eq!(batches[1][0].resource_key(), (3u64, 3u64));
+        assert_eq!(buffer.batches[1][0].id(), 1);
         assert_eq!(buffer.batches[2].len(), 1);
-        // assert_eq!(batches[2][0].resource_key(), (2u64, 2u64));
+        assert_eq!(buffer.batches[2][0].id(), 2);
     }
 
     #[test]
@@ -620,14 +591,14 @@ mod tests {
 
         assert_eq!(buffer.batches.len(), 3);
         assert_eq!(buffer.batches[0].len(), 3);
-        // assert_eq!(batches[0][0].resource_key(), (1u64, 0u64));
-        // assert_eq!(batches[0][1].resource_key(), (3u64, 2u64));
-        // assert_eq!(batches[0][2].resource_key(), (1u64, 0u64));
+        assert_eq!(buffer.batches[0][0].id(), 0);
+        assert_eq!(buffer.batches[0][1].id(), 1);
+        assert_eq!(buffer.batches[0][2].id(), 2);
         assert_eq!(buffer.batches[1].len(), 2);
-        // assert_eq!(batches[1][0].resource_key(), (3u64, 0u64));
-        // assert_eq!(batches[1][1].resource_key(), (1u64, 0u64));
+        assert_eq!(buffer.batches[1][0].id(), 3);
+        assert_eq!(buffer.batches[1][1].id(), 4);
         assert_eq!(buffer.batches[2].len(), 1);
-        // assert_eq!(batches[2][0].resource_key(), (1u64, 1u64));
+        assert_eq!(buffer.batches[2][0].id(), 5);
     }
 
     #[test]

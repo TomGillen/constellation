@@ -2,8 +2,8 @@ use std::ops::{Deref, DerefMut};
 use std::collections::hash_map;
 use std::collections::hash_map::{Values, ValuesMut};
 use std::slice;
+use std::any::Any;
 
-use mopa::Any;
 use fnv::FnvHashMap;
 
 use entities::*;
@@ -11,7 +11,22 @@ use bitset::*;
 use join::*;
 
 pub trait Resource : Any + Send + Sync { }
-mopafy!(Resource);
+
+impl Resource {
+    /// Returns a reference to the boxed value, blindly assuming it to be of type `T`.
+    /// If you are not *absolutely certain* of `T`, you *must not* call this.
+    #[inline]
+    pub unsafe fn downcast_ref_unsafe<T>(&self) -> &T {
+        &*(self as *const Self as *const T)
+    }
+
+    /// Returns a reference to the boxed value, blindly assuming it to be of type `T`.
+    /// If you are not *absolutely certain* of `T`, you *must not* call this.
+    #[inline]
+    pub unsafe fn downcast_mut_unsafe<T>(&mut self) -> &mut T {
+        &mut *(self as *mut Self as *mut T)
+    }
+}
 
 pub trait StoresEntityData : Send + Sync {
     fn clear(&mut self, &[Index]);

@@ -1,5 +1,3 @@
-#[macro_use]
-extern crate mopa;
 extern crate fnv;
 extern crate crossbeam;
 extern crate rayon;
