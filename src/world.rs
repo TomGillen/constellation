@@ -1,9 +1,8 @@
 use std::collections::HashSet;
 use std::ops::{Deref, DerefMut};
 use std::any::TypeId;
-use std::sync::RwLock;
+use std::cell::{RefCell, Ref, RefMut};
 use std::mem;
-use std::sync::{RwLockReadGuard, RwLockWriteGuard};
 use std::marker::PhantomData;
 
 use rayon::prelude::*;
@@ -15,10 +14,13 @@ use resource::*;
 
 pub struct World {
     entities: Entities,
-    resources: FnvHashMap<TypeId, (u8, RwLock<BoxedResource>)>,
+    resources: FnvHashMap<TypeId, (u8, RefCell<BoxedResource>)>,
     entity_resources: Vec<TypeId>,
     changes_buffer: Option<Vec<EntityChangeSet>>
 }
+
+// resource access is ensured safe by the system scheduler
+unsafe impl Sync for World {}
 
 impl World {
     pub fn new() -> World {
@@ -34,7 +36,7 @@ impl World {
         let type_id = TypeId::of::<T>();
         let boxed = BoxedResource::Resource(Box::new(resource) as Box<Resource>);
         let id = self.resources.len() as u8;
-        let value = (id, RwLock::new(boxed));
+        let value = (id, RefCell::new(boxed));
         self.resources.insert(type_id, value);
         id
     }
@@ -43,27 +45,29 @@ impl World {
         let type_id = TypeId::of::<T>();
         let boxed = BoxedResource::EntityResource(Box::new(resource) as Box<StoresEntityData>);
         let id = self.resources.len() as u8;
-        let value = (id, RwLock::new(boxed));
+        let value = (id, RefCell::new(boxed));
         self.resources.insert(type_id, value);
         self.entity_resources.push(type_id);
         id
     }
 
-    fn get_resource<T: Resource>(&self) -> Option<(u8, ResourceReadGuard<T>)> {
+    // Can only be safely called from within a system, and only for the resources the system declares
+    fn get_resource<T: Resource>(&self) -> Option<(u8, ResourceRef<T>)> {
         let type_id = TypeId::of::<T>();
         if let Some(&(id, ref resource)) = self.resources.get(&type_id) {
-            let guard = resource.read().unwrap();
-            let resource = ResourceReadGuard::<T>::new(guard);
+            let borrow = resource.borrow();
+            let resource = ResourceRef::<T>::new(borrow);
             return Some((id, resource));
         }
         return None;
     }
 
-    fn get_resource_mut<T: Resource>(&self) -> Option<(u8, ResourceWriteGuard<T>)> {
+    // Can only be safely called from within a system, and only for the resources the system declares
+    fn get_resource_mut<T: Resource>(&self) -> Option<(u8, ResourceRefMut<T>)> {
         let type_id = TypeId::of::<T>();
         if let Some(&(id, ref resource)) = self.resources.get(&type_id) {
-            let guard = resource.write().unwrap();
-            let resource = ResourceWriteGuard::<T>::new(guard);
+            let borrow = resource.borrow_mut();
+            let resource = ResourceRefMut::<T>::new(borrow);
             return Some((id, resource));
         }
         return None;
@@ -71,9 +75,8 @@ impl World {
 
     fn clean_deleted_entities(&mut self, changes: &[EntityChangeSet]) {
         for id in self.entity_resources.iter() {
-            let &mut (_, ref mut lock) = self.resources.get_mut(&id).unwrap();
-            let mut guard = lock.write().unwrap();
-            let resource = guard.deref_mut();
+            let &mut (_, ref mut cell) = self.resources.get_mut(&id).unwrap();
+            let resource: &mut BoxedResource = &mut cell.borrow_mut();
             if let &mut BoxedResource::EntityResource(ref mut boxed) = resource {
                 for cs in changes.iter() {
                     boxed.clear(&cs.deleted);
@@ -88,21 +91,21 @@ enum BoxedResource {
     EntityResource(Box<StoresEntityData>)
 }
 
-struct ResourceReadGuard<'a, T: Resource> {
+struct ResourceRef<'a, T: Resource> {
     phantom: PhantomData<T>,
-    guard: RwLockReadGuard<'a, BoxedResource>
+    guard: Ref<'a, BoxedResource>
 }
 
-impl<'a, T: Resource> ResourceReadGuard<'a, T> {
-    pub fn new(guard: RwLockReadGuard<'a, BoxedResource>) -> ResourceReadGuard<'a, T> {
-        ResourceReadGuard {
+impl<'a, T: Resource> ResourceRef<'a, T> {
+    pub fn new(guard: Ref<'a, BoxedResource>) -> ResourceRef<'a, T> {
+        ResourceRef {
             phantom: PhantomData,
             guard: guard
         }
     }
 }
 
-impl<'a, T: Resource> Deref for ResourceReadGuard<'a, T> {
+impl<'a, T: Resource> Deref for ResourceRef<'a, T> {
     type Target = T;
 
     fn deref(&self) -> &T {
@@ -114,21 +117,21 @@ impl<'a, T: Resource> Deref for ResourceReadGuard<'a, T> {
     }
 }
 
-struct ResourceWriteGuard<'a, T: Resource> {
+struct ResourceRefMut<'a, T: Resource> {
     phantom: PhantomData<T>,
-    guard: RwLockWriteGuard<'a, BoxedResource>
+    guard: RefMut<'a, BoxedResource>
 }
 
-impl<'a, T: Resource> ResourceWriteGuard<'a, T> {
-    pub fn new(guard: RwLockWriteGuard<'a, BoxedResource>) -> ResourceWriteGuard<'a, T> {
-        ResourceWriteGuard {
+impl<'a, T: Resource> ResourceRefMut<'a, T> {
+    pub fn new(guard: RefMut<'a, BoxedResource>) -> ResourceRefMut<'a, T> {
+        ResourceRefMut {
             phantom: PhantomData,
             guard: guard
         }
     }
 }
 
-impl<'a, T: Resource> Deref for ResourceWriteGuard<'a, T> {
+impl<'a, T: Resource> Deref for ResourceRefMut<'a, T> {
     type Target = T;
 
     fn deref(&self) -> &T {
@@ -140,7 +143,7 @@ impl<'a, T: Resource> Deref for ResourceWriteGuard<'a, T> {
     }
 }
 
-impl<'a, T: Resource> DerefMut for ResourceWriteGuard<'a, T> {
+impl<'a, T: Resource> DerefMut for ResourceRefMut<'a, T> {
     fn deref_mut(&mut self) -> &mut T {
         //unsafe { self.guard.deref_mut().downcast_mut_unchecked::<T>() }
         let boxed = self.guard.deref_mut();
@@ -220,6 +223,12 @@ impl SystemCommandBuffer {
     }
 }
 
+fn can_batch_system(reading: &HashSet<TypeId>, writing: &HashSet<TypeId>, (system_reads, system_writes): (&HashSet<TypeId>, &HashSet<TypeId>)) -> bool {
+    // the system does not write to any resources being read (which includes writers)
+    // the system does not read any resources that are being written
+    reading.is_disjoint(system_writes) && writing.is_disjoint(system_reads)
+}
+
 impl SystemScope {
     pub fn new() -> SystemScope {
         SystemScope {
@@ -294,37 +303,12 @@ impl_run_system!(run_r4w3 [R0, R1, R2, R3] [W0, W1, W2]);
 impl_run_system!(run_r5w3 [R0, R1, R2, R3, R4] [W0, W1, W2]);
 impl_run_system!(run_r6w3 [R0, R1, R2, R3, R4, R5] [W0, W1, W2]);
 
-fn can_batch_system(reading: &HashSet<TypeId>, writing: &HashSet<TypeId>, (system_reads, system_writes): (&HashSet<TypeId>, &HashSet<TypeId>)) -> bool {
-    // the system does not write to any resources being read (which includes writers)
-    // the system does not read any resources that are being written
-    reading.is_disjoint(system_writes) && writing.is_disjoint(system_reads)
-}
-
 pub enum SequentialExecute {
     SequentialCommit,
     ParallelBatchedCommit
 }
 
 impl World {
-    fn execute_batched<F>(&mut self, systems: &mut SystemCommandBuffer, mut f: F)
-        where F: FnMut(&mut World, &mut Vec<Box<System>>, &mut Vec<EntityChangeSet>)
-    {
-        let mut changes = mem::replace(&mut self.changes_buffer, None).unwrap();
-        for batch in systems.batches.iter_mut() {
-            let additional = batch.len() - changes.len();
-            if additional > 0 {
-                changes.reserve(additional);
-            }
-
-            f(self, batch, &mut changes);
-
-            self.clean_deleted_entities(&changes);
-            self.entities.merge(changes.drain(..));
-        }
-
-        self.changes_buffer = Some(changes);
-    }
-
     pub fn run(&mut self, systems: &mut SystemCommandBuffer) {
         self.execute_batched(systems, |world, batch, changes| {
             batch.par_iter_mut()
@@ -357,6 +341,25 @@ impl World {
                 self.entities.merge(ArrayVec::from(changes).into_iter());
             }
         }
+    }
+
+    fn execute_batched<F>(&mut self, systems: &mut SystemCommandBuffer, mut f: F)
+        where F: FnMut(&mut World, &mut Vec<Box<System>>, &mut Vec<EntityChangeSet>)
+    {
+        let mut changes = mem::replace(&mut self.changes_buffer, None).unwrap();
+        for batch in systems.batches.iter_mut() {
+            let additional = batch.len() - changes.len();
+            if additional > 0 {
+                changes.reserve(additional);
+            }
+
+            f(self, batch, &mut changes);
+
+            self.clean_deleted_entities(&changes);
+            self.entities.merge(changes.drain(..));
+        }
+
+        self.changes_buffer = Some(changes);
     }
 }
 
