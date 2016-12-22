@@ -2,8 +2,6 @@ use std::ops::{Deref, DerefMut};
 use std::collections::hash_map;
 use std::collections::hash_map::{Values, ValuesMut};
 use std::slice;
-use std::sync::{RwLockReadGuard, RwLockWriteGuard};
-use std::marker::PhantomData;
 
 use mopa::Any;
 use fnv::FnvHashMap;
@@ -18,7 +16,6 @@ mopafy!(Resource);
 pub trait StoresEntityData : Send + Sync {
     fn clear(&mut self, &[Index]);
 }
-//mopafy!(StoresEntityData);
 
 impl StoresEntityData {
     /// Returns a reference to the boxed value, blindly assuming it to be of type `T`.
@@ -45,74 +42,6 @@ pub trait EntityResource : Resource + StoresEntityData {
 
     fn deconstruct(&self) -> (&BitSet, &Self::Api);
     fn deconstruct_mut(&mut self) -> (&BitSet, &mut Self::Api);
-}
-
-pub enum BoxedResource {
-    Resource(Box<Resource>),
-    EntityResource(Box<StoresEntityData>)
-}
-
-pub struct ResourceReadGuard<'a, T: Resource> {
-    phantom: PhantomData<T>,
-    guard: RwLockReadGuard<'a, BoxedResource>
-}
-
-impl<'a, T: Resource> ResourceReadGuard<'a, T> {
-    pub fn new(guard: RwLockReadGuard<'a, BoxedResource>) -> ResourceReadGuard<'a, T> {
-        ResourceReadGuard {
-            phantom: PhantomData,
-            guard: guard
-        }
-    }
-}
-
-impl<'a, T: Resource> Deref for ResourceReadGuard<'a, T> {
-    type Target = T;
-
-    fn deref(&self) -> &T {
-        let boxed = self.guard.deref();
-        match boxed {
-            &BoxedResource::Resource(ref res) => unsafe { res.downcast_ref_unchecked::<T>() },
-            &BoxedResource::EntityResource(ref res) => unsafe { res.downcast_ref_unsafe::<T>() }
-        }
-    }
-}
-
-pub struct ResourceWriteGuard<'a, T: Resource> {
-    phantom: PhantomData<T>,
-    guard: RwLockWriteGuard<'a, BoxedResource>
-}
-
-impl<'a, T: Resource> ResourceWriteGuard<'a, T> {
-    pub fn new(guard: RwLockWriteGuard<'a, BoxedResource>) -> ResourceWriteGuard<'a, T> {
-        ResourceWriteGuard {
-            phantom: PhantomData,
-            guard: guard
-        }
-    }
-}
-
-impl<'a, T: Resource> Deref for ResourceWriteGuard<'a, T> {
-    type Target = T;
-
-    fn deref(&self) -> &T {
-        let boxed = self.guard.deref();
-        match boxed {
-            &BoxedResource::Resource(ref res) => unsafe { res.downcast_ref_unchecked::<T>() },
-            &BoxedResource::EntityResource(ref res) => unsafe { res.downcast_ref_unsafe::<T>() }
-        }
-    }
-}
-
-impl<'a, T: Resource> DerefMut for ResourceWriteGuard<'a, T> {
-    fn deref_mut(&mut self) -> &mut T {
-        //unsafe { self.guard.deref_mut().downcast_mut_unchecked::<T>() }
-        let boxed = self.guard.deref_mut();
-        match boxed {
-            &mut BoxedResource::Resource(ref mut res) => unsafe { res.downcast_mut_unchecked::<T>() },
-            &mut BoxedResource::EntityResource(ref mut res) => unsafe { res.downcast_mut_unsafe::<T>() }
-        }
-    }
 }
 
 macro_rules! impl_iter_entities {

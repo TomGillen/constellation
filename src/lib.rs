@@ -7,17 +7,20 @@ extern crate arrayvec;
 extern crate atom;
 extern crate tuple_utils;
 
-pub mod entities;
-pub mod world;
+mod entities;
+mod world;
+mod resource;
+
 pub mod bitset;
 pub mod join;
-pub mod resource;
+
+pub use entities::*;
+pub use world::*;
+pub use resource::*;
 
 #[cfg(test)]
 mod tests {
-    use entities::*;
-    use world::*;
-    use resource::*;
+    use super::*;
 
     struct Position {
         x: f32,
