@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::ops::{Deref, DerefMut};
 use std::any::TypeId;
 use std::sync::RwLock;
@@ -66,42 +67,6 @@ impl World {
         return None;
     }
 
-    fn get_resource_id<T: Resource>(&self) -> Option<u8> {
-        let type_id = TypeId::of::<T>();
-        if let Some(&(id, _)) = self.resources.get(&type_id) {
-            return Some(id);
-        }
-        return None;
-    }
-
-    pub fn update(&mut self, systems: &mut [Box<System>]) {
-        let mut changes = mem::replace(&mut self.changes_buffer, None).unwrap();
-        for batch in SystemBatchIter::new(systems) {
-            let additional = batch.len() - changes.len();
-            if additional > 0 {
-                changes.reserve(additional);
-            }
-
-            batch.par_iter_mut()
-                .weight_max()
-                .map(|system| system.execute(self))
-                .collect_into(&mut changes);
-
-            self.clean_deleted_entities(&changes);
-            self.entities.merge(changes.drain(..));
-        }
-
-        self.changes_buffer = Some(changes);
-    }
-
-    pub fn update_sequential(&mut self, systems: &mut [Box<System>]) {
-        for mut system in systems.iter_mut() {
-            let changes = [system.execute(self)];
-            self.clean_deleted_entities(&changes);
-            self.entities.merge(ArrayVec::from(changes).into_iter());
-        }
-    }
-
     fn clean_deleted_entities(&mut self, changes: &[EntityChangeSet]) {
         for id in self.entity_resources.iter() {
             let &mut (_, ref mut lock) = self.resources.get_mut(&id).unwrap();
@@ -116,21 +81,21 @@ impl World {
     }
 }
 
-pub trait System : Send {
-    fn resource_key(&self) -> (u64, u64);
+trait System : Send {
+    fn resource_access(&self) -> (&HashSet<TypeId>, &HashSet<TypeId>);
     fn execute(&mut self, &World) -> EntityChangeSet;
 }
 
 pub struct FnSystem<T: FnMut(&World) -> EntityChangeSet + Send> {
-    read: u64,
-    write: u64,
+    read: HashSet<TypeId>,
+    write: HashSet<TypeId>,
     f: T
 }
 
 impl<T: FnMut(&World) -> EntityChangeSet + Send> System for FnSystem<T> {
     #[inline]
-    fn resource_key(&self) -> (u64, u64) {
-        (self.read, self.write)
+    fn resource_access(&self) -> (&HashSet<TypeId>, &HashSet<TypeId>) {
+        (&self.read, &self.write)
     }
 
     #[inline]
@@ -139,128 +104,188 @@ impl<T: FnMut(&World) -> EntityChangeSet + Send> System for FnSystem<T> {
     }
 }
 
-impl World {
-    pub fn system<F>(&self, mut f: F) -> Box<System>
-        where F: FnMut(&mut EntitiesTransaction) + Send + 'static
-    {
-        let system = move |world: &World| {
-            let mut tx = world.entities.transaction();
-            f(&mut tx);
-            tx.to_change_set()
-        };
+pub struct SystemCommandBuffer {
+    batches: Vec<Vec<Box<System>>>
+}
 
-        Box::new(FnSystem {
-            read: 0,
-            write: 0,
-            f: system
-        })
+pub struct SystemScope {
+    systems: Vec<Box<System>>
+}
+
+impl SystemCommandBuffer {
+    pub fn new() -> SystemCommandBuffer {
+        SystemCommandBuffer {
+            batches: Vec::new()
+        }
+    }
+
+    pub fn queue_systems<'a, F>(&mut self, f: F)
+        where F: FnOnce(&mut SystemScope) + 'a
+    {
+        let mut scope = SystemScope::new();
+        f(&mut scope);
+
+        let mut reading = HashSet::<TypeId>::new();
+        let mut writing = HashSet::<TypeId>::new();
+        let mut batch = Vec::<Box<System>>::new();
+        for system in scope.systems.into_iter() {
+            {
+                let (system_reading, system_writing) = system.resource_access();
+                if !can_batch_system(&reading, &writing, (system_reading, system_writing)) {
+                    self.batches.push(batch);
+                    batch = Vec::<Box<System>>::new();
+                    reading.clear();
+                    writing.clear();
+                }
+
+                reading = &reading | system_reading;
+                writing = &writing | system_writing;
+            }
+            batch.push(system);
+        }
+
+        if batch.len() > 0 {
+            self.batches.push(batch);
+        }
     }
 }
 
-macro_rules! impl_system {
+impl SystemScope {
+    pub fn new() -> SystemScope {
+        SystemScope {
+            systems: Vec::new()
+        }
+    }
+}
+
+macro_rules! impl_run_system {
     ($name:ident [$($read:ident),*] [$($write:ident),*]) => (
-        impl World {
-            #[allow(non_snake_case, unused_variables)]
-            pub fn $name<$($read,)* $($write,)* F>(&self, mut f: F) -> Box<System>
+        impl SystemScope {
+            #[allow(non_snake_case, unused_variables, unused_mut)]
+            pub fn $name<$($read,)* $($write,)* F>(&mut self, mut f: F)
                 where $($read:Resource,)*
                       $($write:Resource,)*
                       F: for<'a, 'b> FnMut(&'a mut EntitiesTransaction<'b>, $(&'b $read,)* $(&'b mut $write,)*) + Send + 'static
             {
                 let system = move |world: &World| {
-                    $(let (_, $read) = world.get_resource::<$read>().unwrap();)*
-                    $(let (_, mut $write) = world.get_resource_mut::<$write>().unwrap();)*
+                    $(let (_, $read) = world.get_resource::<$read>().expect("World does not contain required resource");)*
+                    $(let (_, mut $write) = world.get_resource_mut::<$write>().expect("World does not contain required resource");)*
 
                     let mut tx = world.entities.transaction();
                     f(&mut tx, $($read.deref(),)* $($write.deref_mut(),)*);
                     tx.to_change_set()
                 };
 
-                $(let $read = 1u64 << self.get_resource_id::<$read>().unwrap();)*
-                $(let $write = 1u64 << self.get_resource_id::<$write>().unwrap();)*
+                let mut read = HashSet::<TypeId>::new();
+                $(read.insert(TypeId::of::<$read>());)*
+                $(read.insert(TypeId::of::<$write>());)*
 
-                Box::new(FnSystem {
-                    read: 0 $(| $write)* $(| $read)*,
-                    write: 0 $(| $write)*,
+                let mut write = HashSet::<TypeId>::new();
+                $(write.insert(TypeId::of::<$write>());)*
+
+                let boxed = Box::new(FnSystem {
+                    read: read,
+                    write: write,
                     f: system
-                })
+                });
+
+                self.systems.push(boxed);
             }
         }
     )
 }
 
-impl_system!(system_r0w0 [] []);
-impl_system!(system_r1w0 [R0] []);
-impl_system!(system_r2w0 [R0, R1] []);
-impl_system!(system_r3w0 [R0, R1, R2] []);
-impl_system!(system_r4w0 [R0, R1, R2, R3] []);
-impl_system!(system_r5w0 [R0, R1, R2, R3, R4] []);
-impl_system!(system_r6w0 [R0, R1, R2, R3, R4, R5] []);
-impl_system!(system_r0w1 [] [W0]);
-impl_system!(system_r1w1 [R0] [W0]);
-impl_system!(system_r2w1 [R0, R1] [W0]);
-impl_system!(system_r3w1 [R0, R1, R2] [W0]);
-impl_system!(system_r4w1 [R0, R1, R2, R3] [W0]);
-impl_system!(system_r5w1 [R0, R1, R2, R3, R4] [W0]);
-impl_system!(system_r6w1 [R0, R1, R2, R3, R4, R5] [W0]);
-impl_system!(system_r0w2 [] [W0, W1]);
-impl_system!(system_r1w2 [R0] [W0, W1]);
-impl_system!(system_r2w2 [R0, R1] [W0, W1]);
-impl_system!(system_r3w2 [R0, R1, R2] [W0, W1]);
-impl_system!(system_r4w2 [R0, R1, R2, R3] [W0, W1]);
-impl_system!(system_r5w2 [R0, R1, R2, R3, R4] [W0, W1]);
-impl_system!(system_r6w2 [R0, R1, R2, R3, R4, R5] [W0, W1]);
-impl_system!(system_r0w3 [] [W0, W1, W3]);
-impl_system!(system_r1w3 [R0] [W0, W1, W2]);
-impl_system!(system_r2w3 [R0, R1] [W0, W1, W2]);
-impl_system!(system_r3w3 [R0, R1, R2] [W0, W1, W2]);
-impl_system!(system_r4w3 [R0, R1, R2, R3] [W0, W1, W2]);
-impl_system!(system_r5w3 [R0, R1, R2, R3, R4] [W0, W1, W2]);
-impl_system!(system_r6w3 [R0, R1, R2, R3, R4, R5] [W0, W1, W2]);
+impl_run_system!(run_r0w0 [] []);
+impl_run_system!(run_r1w0 [R0] []);
+impl_run_system!(run_r2w0 [R0, R1] []);
+impl_run_system!(run_r3w0 [R0, R1, R2] []);
+impl_run_system!(run_r4w0 [R0, R1, R2, R3] []);
+impl_run_system!(run_r5w0 [R0, R1, R2, R3, R4] []);
+impl_run_system!(run_r6w0 [R0, R1, R2, R3, R4, R5] []);
+impl_run_system!(run_r0w1 [] [W0]);
+impl_run_system!(run_r1w1 [R0] [W0]);
+impl_run_system!(run_r2w1 [R0, R1] [W0]);
+impl_run_system!(run_r3w1 [R0, R1, R2] [W0]);
+impl_run_system!(run_r4w1 [R0, R1, R2, R3] [W0]);
+impl_run_system!(run_r5w1 [R0, R1, R2, R3, R4] [W0]);
+impl_run_system!(run_r6w1 [R0, R1, R2, R3, R4, R5] [W0]);
+impl_run_system!(run_r0w2 [] [W0, W1]);
+impl_run_system!(run_r1w2 [R0] [W0, W1]);
+impl_run_system!(run_r2w2 [R0, R1] [W0, W1]);
+impl_run_system!(run_r3w2 [R0, R1, R2] [W0, W1]);
+impl_run_system!(run_r4w2 [R0, R1, R2, R3] [W0, W1]);
+impl_run_system!(run_r5w2 [R0, R1, R2, R3, R4] [W0, W1]);
+impl_run_system!(run_r6w2 [R0, R1, R2, R3, R4, R5] [W0, W1]);
+impl_run_system!(run_r0w3 [] [W0, W1, W3]);
+impl_run_system!(run_r1w3 [R0] [W0, W1, W2]);
+impl_run_system!(run_r2w3 [R0, R1] [W0, W1, W2]);
+impl_run_system!(run_r3w3 [R0, R1, R2] [W0, W1, W2]);
+impl_run_system!(run_r4w3 [R0, R1, R2, R3] [W0, W1, W2]);
+impl_run_system!(run_r5w3 [R0, R1, R2, R3, R4] [W0, W1, W2]);
+impl_run_system!(run_r6w3 [R0, R1, R2, R3, R4, R5] [W0, W1, W2]);
 
-struct SystemBatchIter<'a> {
-    v: &'a mut [Box<System>]
-}
-
-impl<'a> SystemBatchIter<'a> {
-    fn new(systems: &'a mut [Box<System>]) -> SystemBatchIter<'a> {
-        SystemBatchIter {
-            v: systems
-        }
-    }
-}
-
-fn can_batch_system(reading: u64, writing: u64, (system_reads, system_writes): (u64, u64)) -> bool {
+fn can_batch_system(reading: &HashSet<TypeId>, writing: &HashSet<TypeId>, (system_reads, system_writes): (&HashSet<TypeId>, &HashSet<TypeId>)) -> bool {
     // the system does not write to any resources being read (which includes writers)
     // the system does not read any resources that are being written
-    (reading & system_writes == 0) && (writing & system_reads == 0)
+    reading.is_disjoint(system_writes) && writing.is_disjoint(system_reads)
 }
 
-impl<'a> Iterator for SystemBatchIter<'a> {
-    type Item = &'a mut [Box<System>];
+pub enum SequentialExecute {
+    SequentialCommit,
+    ParallelBatchedCommit
+}
 
-    #[inline]
-    fn next(&mut self) -> Option<&'a mut [Box<System>]> {
-        if self.v.is_empty() {
-            None
-        } else {
-            let mut shared = 0;
-            let mut exclusive = 0;
-
-            for i in 0..self.v.len() {
-                let (read, write) = self.v[i].deref().resource_key();
-                if !can_batch_system(shared, exclusive, (read, write)) {
-                    let tmp = mem::replace(&mut self.v, &mut []);
-                    let (batch, remainder) = tmp.split_at_mut(i);
-                    self.v = remainder;
-                    return Some(batch);
-                }
-
-                shared = shared | read;
-                exclusive = exclusive | write;
+impl World {
+    fn execute_batched<F>(&mut self, systems: &mut SystemCommandBuffer, mut f: F)
+        where F: FnMut(&mut World, &mut Vec<Box<System>>, &mut Vec<EntityChangeSet>)
+    {
+        let mut changes = mem::replace(&mut self.changes_buffer, None).unwrap();
+        for batch in systems.batches.iter_mut() {
+            let additional = batch.len() - changes.len();
+            if additional > 0 {
+                changes.reserve(additional);
             }
 
-            let tmp = mem::replace(&mut self.v, &mut []);
-            Some(tmp)
+            f(self, batch, &mut changes);
+
+            self.clean_deleted_entities(&changes);
+            self.entities.merge(changes.drain(..));
+        }
+
+        self.changes_buffer = Some(changes);
+    }
+
+    pub fn run(&mut self, systems: &mut SystemCommandBuffer) {
+        self.execute_batched(systems, |world, batch, changes| {
+            batch.par_iter_mut()
+                .weight_max()
+                .map(|system| system.execute(world))
+                .collect_into(changes);
+        });
+    }
+
+    pub fn run_sequential(&mut self, systems: &mut SystemCommandBuffer, mode: SequentialExecute) {
+        match mode {
+            SequentialExecute::SequentialCommit => self.run_sequential_sc(systems),
+            SequentialExecute::ParallelBatchedCommit => self.run_sequential_pc(systems)
+        };
+    }
+
+    fn run_sequential_pc(&mut self, systems: &mut SystemCommandBuffer) {
+        self.execute_batched(systems, |world, batch, changes| {
+            for system in batch.iter_mut() {
+                changes.push(system.execute(world));
+            }
+        });
+    }
+
+    fn run_sequential_sc(&mut self, systems: &mut SystemCommandBuffer) {
+        for batch in systems.batches.iter_mut() {
+            for system in batch.iter_mut() {
+                let changes = [system.execute(self)];
+                self.clean_deleted_entities(&changes);
+                self.entities.merge(ArrayVec::from(changes).into_iter());
+            }
         }
     }
 }
@@ -315,16 +340,6 @@ mod tests {
     }
 
     #[test]
-    fn get_resouce_id() {
-        let mut world = World::new();
-
-        let asigned = world.register_resource(TestResource { x: 1 });
-        let retrieved = world.get_resource_id::<TestResource>().unwrap();
-
-        assert_eq!(asigned, retrieved);
-    }
-
-    #[test]
     fn get_resource() {
         let mut world = World::new();
         world.register_resource(TestResource { x: 1 });
@@ -344,21 +359,19 @@ mod tests {
     }
 
     #[test]
-    fn create_fn_system() {
-        let world = World::new();
-        world.system(|_| {});
-    }
-
-    #[test]
     fn run_system() {
         let mut world = World::new();
 
         let run_count = Arc::new(AtomicUsize::new(0));
 
         let run_count_clone = run_count.clone();
-        let system = world.system(move |_| { run_count_clone.fetch_add(1, Ordering::Relaxed); });
 
-        world.update(&mut vec![system]);
+        let mut buffer = SystemCommandBuffer::new();
+        buffer.queue_systems(|scope| {
+            scope.run_r0w0(move |_| { run_count_clone.fetch_add(1, Ordering::Relaxed); });
+        });
+
+        world.run(&mut buffer);
 
         assert_eq!(run_count.load(Ordering::Relaxed), 1);
     }
@@ -369,16 +382,18 @@ mod tests {
 
         let run_count = Arc::new(AtomicUsize::new(0));
 
-        let run_count_clone = run_count.clone();
-        let system1 = world.system(move |_| { run_count_clone.fetch_add(1, Ordering::Relaxed); });
+        let run_count_clone1 = run_count.clone();
+        let run_count_clone2 = run_count.clone();
+        let run_count_clone3 = run_count.clone();
 
-        let run_count_clone = run_count.clone();
-        let system2 = world.system(move |_| { run_count_clone.fetch_add(1, Ordering::Relaxed); });
+        let mut buffer = SystemCommandBuffer::new();
+        buffer.queue_systems(|scope| {
+            scope.run_r0w0(move |_| { run_count_clone1.fetch_add(1, Ordering::Relaxed); });
+            scope.run_r0w0(move |_| { run_count_clone2.fetch_add(1, Ordering::Relaxed); });
+            scope.run_r0w0(move |_| { run_count_clone3.fetch_add(1, Ordering::Relaxed); });
+        });
 
-        let run_count_clone = run_count.clone();
-        let system3 = world.system(move |_| { run_count_clone.fetch_add(1, Ordering::Relaxed); });
-
-        world.update(&mut vec![system1, system2, system3]);
+        world.run(&mut buffer);
 
         assert_eq!(run_count.load(Ordering::Relaxed), 3);
     }
@@ -389,24 +404,24 @@ mod tests {
         world.register_resource(TestResource { x: 1 });
         world.register_resource(TestResource2 {});
 
-        let reader = world.system_r1w0(move |_, r: &TestResource| {
-            assert_eq!(r.x, 1);
+        let mut buffer = SystemCommandBuffer::new();
+        buffer.queue_systems(|scope| {
+            scope.run_r1w0(move |_, r: &TestResource| {
+                assert_eq!(r.x, 1);
+            });
+            scope.run_r1w0(move |_, r: &TestResource| {
+                assert_eq!(r.x, 1);
+            });
+            scope.run_r1w1(|_, _: &TestResource2, w: &mut TestResource| {
+                assert_eq!(w.x, 1);
+                w.x = 2;
+            });
+            scope.run_r1w0(move |_, r: &TestResource| {
+                assert_eq!(r.x, 2);
+            });
         });
 
-        let reader2 = world.system_r1w0(move |_, r: &TestResource| {
-            assert_eq!(r.x, 1);
-        });
-
-        let writer = world.system_r1w1(|_, _: &TestResource2, w: &mut TestResource| {
-            assert_eq!(w.x, 1);
-            w.x = 2;
-        });
-
-        let reader3 = world.system_r1w0(move |_, r: &TestResource| {
-            assert_eq!(r.x, 2);
-        });
-
-        world.update_sequential(&mut vec![reader, reader2, writer, reader3]);
+        world.run_sequential(&mut buffer, SequentialExecute::SequentialCommit);
     }
 
     #[test]
@@ -415,257 +430,150 @@ mod tests {
         world.register_resource(TestResource { x: 1 });
         world.register_resource(TestResource2 {});
 
-        let reader = world.system_r1w0(move |_, r: &TestResource| {
-            assert_eq!(r.x, 1);
+        let mut buffer = SystemCommandBuffer::new();
+        buffer.queue_systems(|scope| {
+            scope.run_r1w0(move |_, r: &TestResource| {
+                assert_eq!(r.x, 1);
+            });
+            scope.run_r1w0(move |_, r: &TestResource| {
+                assert_eq!(r.x, 1);
+            });
+            scope.run_r1w1(|_, _: &TestResource2, w: &mut TestResource| {
+                assert_eq!(w.x, 1);
+                w.x = 2;
+            });
+            scope.run_r1w0(move |_, r: &TestResource| {
+                assert_eq!(r.x, 2);
+            });
         });
 
-        let reader2 = world.system_r1w0(move |_, r: &TestResource| {
-            assert_eq!(r.x, 1);
-        });
-
-        let writer = world.system_r1w1(|_, _: &TestResource2, w: &mut TestResource| {
-            assert_eq!(w.x, 1);
-            w.x = 2;
-        });
-
-        let reader3 = world.system_r1w0(move |_, r: &TestResource| {
-            assert_eq!(r.x, 2);
-        });
-
-        world.update(&mut vec![reader, reader2, writer, reader3]);
-    }
-
-    #[derive(PartialEq, Eq, Debug)]
-    struct TestSystemIter {
-        pub read: u64,
-        pub write: u64
-    }
-
-    impl System for TestSystemIter {
-        fn resource_key(&self) -> (u64, u64) {
-            (self.read, self.write)
-        }
-
-        fn execute(&mut self, _: &World) -> EntityChangeSet {
-            EntityChangeSet {
-                deleted: Vec::new()
-            }
-        }
+        world.run(&mut buffer);
     }
 
     #[test]
     fn system_batch_all_read_distinct() {
-        let a = Box::new(TestSystemIter {
-            read: 1u64,
-            write: 0
-        }) as Box<System + 'static>;
+        let mut buffer = SystemCommandBuffer::new();
 
-        let b = Box::new(TestSystemIter {
-            read: 2u64,
-            write: 0
-        }) as Box<System + 'static>;
+        buffer.queue_systems(|scope| {
+            scope.run_r1w0(|_, _: &TestResource| {});
+            scope.run_r1w0(|_, _: &TestResource2| {});
+            scope.run_r1w0(|_, _: &TestResource3| {});
+        });
 
-        let c = Box::new(TestSystemIter {
-            read: 4u64,
-            write: 0
-        }) as Box<System + 'static>;
-
-        let mut systems = vec![a, b, c];
-        let batches = super::SystemBatchIter {
-            v: systems.as_mut_slice()
-        };
-
-        let batches = batches.collect::<Vec<&mut [Box<System>]>>();
-        assert_eq!(batches.len(), 1);
-        assert_eq!(batches[0].len(), 3);
+        assert_eq!(buffer.batches.len(), 1);
+        assert_eq!(buffer.batches[0].len(), 3);
     }
 
     #[test]
     fn system_batch_all_read() {
-        let a = Box::new(TestSystemIter {
-            read: 1u64,
-            write: 0
-        }) as Box<System + 'static>;
+        let mut buffer = SystemCommandBuffer::new();
 
-        let b = Box::new(TestSystemIter {
-            read: 1u64,
-            write: 0
-        }) as Box<System + 'static>;
+        buffer.queue_systems(|scope| {
+            scope.run_r1w0(|_, _: &TestResource| {});
+            scope.run_r1w0(|_, _: &TestResource| {});
+            scope.run_r1w0(|_, _: &TestResource2| {});
+        });
 
-        let c = Box::new(TestSystemIter {
-            read: 3u64,
-            write: 0
-        }) as Box<System + 'static>;
-
-        let mut systems = vec![a, b, c];
-        let batches = super::SystemBatchIter {
-            v: systems.as_mut_slice()
-        };
-
-        let batches = batches.collect::<Vec<&mut [Box<System>]>>();
-        assert_eq!(batches.len(), 1);
-        assert_eq!(batches[0].len(), 3);
+        assert_eq!(buffer.batches.len(), 1);
+        assert_eq!(buffer.batches[0].len(), 3);
     }
 
     #[test]
     fn system_batch_all_write_distinct() {
-        let a = Box::new(TestSystemIter {
-            read: 1u64,
-            write: 1u64
-        }) as Box<System + 'static>;
+        let mut buffer = SystemCommandBuffer::new();
 
-        let b = Box::new(TestSystemIter {
-            read: 2u64,
-            write: 2u64
-        }) as Box<System + 'static>;
+        buffer.queue_systems(|scope| {
+            scope.run_r0w1(|_, _: &mut TestResource| {});
+            scope.run_r0w1(|_, _: &mut TestResource2| {});
+            scope.run_r0w1(|_, _: &mut TestResource3| {});
+        });
 
-        let c = Box::new(TestSystemIter {
-            read: 4u64,
-            write: 4u64
-        }) as Box<System + 'static>;
-
-        let mut systems = vec![a, b, c];
-        let batches = super::SystemBatchIter {
-            v: systems.as_mut_slice()
-        };
-
-        let batches = batches.collect::<Vec<&mut [Box<System>]>>();
-        assert_eq!(batches.len(), 1);
-        assert_eq!(batches[0].len(), 3);
-        assert_eq!(batches[0][0].resource_key(), (1u64, 1u64));
-        assert_eq!(batches[0][1].resource_key(), (2u64, 2u64));
-        assert_eq!(batches[0][2].resource_key(), (4u64, 4u64));
+        assert_eq!(buffer.batches.len(), 1);
+        assert_eq!(buffer.batches[0].len(), 3);
+        // assert_eq!(buffer.batches[0][0].resource_key(), (1u64, 1u64));
+        // assert_eq!(buffer.batches[0][1].resource_key(), (2u64, 2u64));
+        // assert_eq!(buffer.batches[0][2].resource_key(), (4u64, 4u64));
     }
 
     #[test]
     fn system_batch_all_write() {
-        let a = Box::new(TestSystemIter {
-            read: 1u64,
-            write: 1u64
-        }) as Box<System + 'static>;
+        let mut buffer = SystemCommandBuffer::new();
 
-        let b = Box::new(TestSystemIter {
-            read: 2u64,
-            write: 2u64
-        }) as Box<System + 'static>;
+        buffer.queue_systems(|scope| {
+            scope.run_r0w1(|_, _: &mut TestResource| {});
+            scope.run_r0w1(|_, _: &mut TestResource2| {});
+            scope.run_r0w2(|_, _: &mut TestResource, _: &mut TestResource2| {});
+        });
 
-        let c = Box::new(TestSystemIter {
-            read: 3u64,
-            write: 3u64
-        }) as Box<System + 'static>;
-
-        let mut systems = vec![a, b, c];
-        let batches = super::SystemBatchIter {
-            v: systems.as_mut_slice()
-        };
-
-        let batches = batches.collect::<Vec<&mut [Box<System>]>>();
-        assert_eq!(batches.len(), 2);
-        assert_eq!(batches[0].len(), 2);
-        assert_eq!(batches[0][0].resource_key(), (1u64, 1u64));
-        assert_eq!(batches[0][1].resource_key(), (2u64, 2u64));
-        assert_eq!(batches[1].len(), 1);
-        assert_eq!(batches[1][0].resource_key(), (3u64, 3u64));
+        assert_eq!(buffer.batches.len(), 2);
+        assert_eq!(buffer.batches[0].len(), 2);
+        // assert_eq!(batches[0][0].resource_key(), (1u64, 1u64));
+        // assert_eq!(batches[0][1].resource_key(), (2u64, 2u64));
+        assert_eq!(buffer.batches[1].len(), 1);
+        // assert_eq!(batches[1][0].resource_key(), (3u64, 3u64));
     }
 
     #[test]
     fn system_batch_all_write_interleaved() {
-        let a = Box::new(TestSystemIter {
-            read: 1u64,
-            write: 1u64
-        }) as Box<System + 'static>;
+        let mut buffer = SystemCommandBuffer::new();
 
-        let b = Box::new(TestSystemIter {
-            read: 3u64,
-            write: 3u64
-        }) as Box<System + 'static>;
+        buffer.queue_systems(|scope| {
+            scope.run_r0w1(|_, _: &mut TestResource| {});
+            scope.run_r0w2(|_, _: &mut TestResource, _: &mut TestResource2| {});
+            scope.run_r0w1(|_, _: &mut TestResource2| {});
+        });
 
-        let c = Box::new(TestSystemIter {
-            read: 2u64,
-            write: 2u64
-        }) as Box<System + 'static>;
-
-        let mut systems = vec![a, b, c];
-        let batches = super::SystemBatchIter {
-            v: systems.as_mut_slice()
-        };
-
-        let batches = batches.collect::<Vec<&mut [Box<System>]>>();
-        assert_eq!(batches.len(), 3);
-        assert_eq!(batches[0].len(), 1);
-        assert_eq!(batches[0][0].resource_key(), (1u64, 1u64));
-        assert_eq!(batches[1].len(), 1);
-        assert_eq!(batches[1][0].resource_key(), (3u64, 3u64));
-        assert_eq!(batches[2].len(), 1);
-        assert_eq!(batches[2][0].resource_key(), (2u64, 2u64));
+        assert_eq!(buffer.batches.len(), 3);
+        assert_eq!(buffer.batches[0].len(), 1);
+        // assert_eq!(batches[0][0].resource_key(), (1u64, 1u64));
+        assert_eq!(buffer.batches[1].len(), 1);
+        // assert_eq!(batches[1][0].resource_key(), (3u64, 3u64));
+        assert_eq!(buffer.batches[2].len(), 1);
+        // assert_eq!(batches[2][0].resource_key(), (2u64, 2u64));
     }
 
     #[test]
     fn system_batch_mixed() {
-        let a = Box::new(TestSystemIter {
-            read: 1u64,
-            write: 0u64
-        }) as Box<System + 'static>;
+        let mut buffer = SystemCommandBuffer::new();
 
-        let b = Box::new(TestSystemIter {
-            read: 3u64,
-            write: 2u64
-        }) as Box<System + 'static>;
+        buffer.queue_systems(|scope| {
+            scope.run_r1w0(|_, _: &TestResource| {});
+            scope.run_r1w1(|_, _: &TestResource, _: &mut TestResource2| {});
+            scope.run_r1w0(|_, _: &TestResource| {});
+            scope.run_r2w0(|_, _: &TestResource, _: &TestResource2| {});
+            scope.run_r1w0(|_, _: &TestResource| {});
+            scope.run_r0w1(|_, _: &mut TestResource| {});
+        });
 
-        let c = Box::new(TestSystemIter {
-            read: 1u64,
-            write: 0u64
-        }) as Box<System + 'static>;
-
-        let d = Box::new(TestSystemIter {
-            read: 3u64,
-            write: 0u64
-        }) as Box<System + 'static>;
-
-        let e = Box::new(TestSystemIter {
-            read: 1u64,
-            write: 0u64
-        }) as Box<System + 'static>;
-
-        let f = Box::new(TestSystemIter {
-            read: 1u64,
-            write: 1u64
-        }) as Box<System + 'static>;
-
-        let mut systems = vec![a, b, c, d, e, f];
-        let batches = super::SystemBatchIter {
-            v: systems.as_mut_slice()
-        };
-
-        let batches = batches.collect::<Vec<&mut [Box<System>]>>();
-
-        for batch in batches.iter() {
-            let keys = batch.iter().map(|s| s.resource_key()).collect::<Vec<(u64, u64)>>();
-            println!("{:?}", keys);
-        }
-
-        assert_eq!(batches.len(), 3);
-        assert_eq!(batches[0].len(), 3);
-        assert_eq!(batches[0][0].resource_key(), (1u64, 0u64));
-        assert_eq!(batches[0][1].resource_key(), (3u64, 2u64));
-        assert_eq!(batches[0][2].resource_key(), (1u64, 0u64));
-        assert_eq!(batches[1].len(), 2);
-        assert_eq!(batches[1][0].resource_key(), (3u64, 0u64));
-        assert_eq!(batches[1][1].resource_key(), (1u64, 0u64));
-        assert_eq!(batches[2].len(), 1);
-        assert_eq!(batches[2][0].resource_key(), (1u64, 1u64));
+        assert_eq!(buffer.batches.len(), 3);
+        assert_eq!(buffer.batches[0].len(), 3);
+        // assert_eq!(batches[0][0].resource_key(), (1u64, 0u64));
+        // assert_eq!(batches[0][1].resource_key(), (3u64, 2u64));
+        // assert_eq!(batches[0][2].resource_key(), (1u64, 0u64));
+        assert_eq!(buffer.batches[1].len(), 2);
+        // assert_eq!(batches[1][0].resource_key(), (3u64, 0u64));
+        // assert_eq!(batches[1][1].resource_key(), (1u64, 0u64));
+        assert_eq!(buffer.batches[2].len(), 1);
+        // assert_eq!(batches[2][0].resource_key(), (1u64, 1u64));
     }
 
     #[test]
-    fn create_fnsystem_r1w1() {
+    fn system_command_buffer() {
+        let mut systems = SystemCommandBuffer::new();
+        systems.queue_systems(|scope| {
+            scope.run_r1w1(|_, _: &TestResource, _: &mut TestResource2| {
+
+            });
+
+            scope.run_r1w1(|_, _: &TestResource, _: &mut TestResource2| {
+
+            });
+        });
+
         let mut world = World::new();
-        let r1_key = world.register_resource(TestResource { x: 1 });
-        let r2_key = world.register_resource(TestResource2 {});
-
-        let s = world.system_r1w1(|_, _: &TestResource, _: &mut TestResource2| {});
-
-        let expected = ((1 << r1_key) | (1 << r2_key), 1 << r2_key);
-        assert_eq!(s.resource_key(), expected);
+        world.register_resource(TestResource { x: 1 });
+        world.register_resource(TestResource2 {});
+        world.run(&mut systems);
     }
 
     #[test]
@@ -673,54 +581,57 @@ mod tests {
         let mut world = World::new();
         world.register_entity_resource(VecResource::<u32>::new());
 
-        let init = world.system_r0w1(|tx, resource: &mut VecResource<u32>| {
-            println!("Creating entities");
-            for i in 0..1000 {
-                let e = tx.create();
-                resource.add(e.index(), i);
-            }
-            println!("Entities created");
-        });
-
-        let verify_init = world.system_r1w0(|_, resource: &VecResource<u32>| {
-            println!("Verifying entity creation");
-            iter_entities_r1w0(resource, |iter, r| {
-                for e in iter {
-                    assert_eq!(e, *r.get(e).unwrap());
+        let mut buffer = SystemCommandBuffer::new();
+        buffer.queue_systems(|scope| {
+            scope.run_r0w1(|tx, resource: &mut VecResource<u32>| {
+                println!("Creating entities");
+                for i in 0..1000 {
+                    let e = tx.create();
+                    resource.add(e.index(), i);
                 }
-            });
-            println!("Verified entity creation");
-        });
-
-        let delete = world.system_r0w1(|tx, resource: &mut VecResource<u32>| {
-            println!("Deleting entities");
-            let mut entities = Vec::<Index>::new();
-            iter_entities_r1w0(resource, |iter, _| {
-                for e in iter {
-                    entities.push(e);
-                }
+                println!("Entities created");
             });
 
-            for e in entities {
-                let entity = tx.by_index(e);
-                tx.destroy(entity);
-            }
-            println!("Deleted entities");
-        });
-
-        let verify_delete = world.system_r1w0(|_, resource: &VecResource<u32>| {
-            println!("Verifying entity deletion");
-            let mut entities = Vec::<Index>::new();
-            iter_entities_r1w0(resource, |iter, _| {
-                for e in iter {
-                    entities.push(e);
-                }
+            scope.run_r1w0(|_, resource: &VecResource<u32>| {
+                println!("Verifying entity creation");
+                iter_entities_r1w0(resource, |iter, r| {
+                    for e in iter {
+                        assert_eq!(e, *r.get(e).unwrap());
+                    }
+                });
+                println!("Verified entity creation");
             });
 
-            assert_eq!(entities.len(), 0);
-            println!("Verified entity delection");
+            scope.run_r0w1(|tx, resource: &mut VecResource<u32>| {
+                println!("Deleting entities");
+                let mut entities = Vec::<Index>::new();
+                iter_entities_r1w0(resource, |iter, _| {
+                    for e in iter {
+                        entities.push(e);
+                    }
+                });
+
+                for e in entities {
+                    let entity = tx.by_index(e);
+                    tx.destroy(entity);
+                }
+                println!("Deleted entities");
+            });
+
+            scope.run_r1w0(|_, resource: &VecResource<u32>| {
+                println!("Verifying entity deletion");
+                let mut entities = Vec::<Index>::new();
+                iter_entities_r1w0(resource, |iter, _| {
+                    for e in iter {
+                        entities.push(e);
+                    }
+                });
+
+                assert_eq!(entities.len(), 0);
+                println!("Verified entity delection");
+            });
         });
 
-        world.update(&mut vec![init, verify_init, delete, verify_delete]);
+        world.run(&mut buffer);
     }
 }
