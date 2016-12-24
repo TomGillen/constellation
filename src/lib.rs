@@ -2,7 +2,7 @@
 
 //! # Constellation ECS
 //!
-//! A data-oriented entity component system optimised for cache coherent resource access
+//! A data-oriented entity component system optimized for cache coherent resource access
 //! and parallel system execution.
 //!
 //! Constellation does not have any native understanding of a "component". Instead, the library
@@ -114,16 +114,16 @@
 //! Systems queued into a command buffer within a single call to `queue_systems` may be executed
 //! in parallel by the world.
 //!
-//! The order in which systems are queued is significant in one way: the scheduler guarentees that
+//! The order in which systems are queued is significant in one way: the scheduler guarantees that
 //! any changes to resources will always be observed in the same order in which systems were
 //! queued.
 //!
 //! For example, given two systems - `ReadPositions` and `WritePositions` - if *WritePositions* was
 //! queued before *ReadPositions*, then it is guarenteed that *ReadPositions* will see any changes
 //! made by *WritePositions*. Conversely, if the order were to be swapped, then *ReadPositions*
-//! is guarenteed to *not* observe the changes made by *WritePositions*.
+//! is guaranteed to *not* observe the changes made by *WritePositions*.
 //!
-//! There is one exception to this. Entity deletions are comitted when all concurrently executing
+//! There is one exception to this. Entity deletions are committed when all concurrently executing
 //! systems have completed. This behavior is deterministic, but not always obvious. If you wish to
 //! ensure that entity deletions from one system are always seen by a later system, then queue
 //! the two systems in separate `queue_systems` calls.
