@@ -12,6 +12,13 @@ Systems request read or write access to a set of resources, which can then be sc
 be potentially executed in parallel by recording them into a `SystemCommandBuffer` and
 executing the command buffer within a `World`.
 
+[Crates.io](https://crates.io/crates/constellation)  
+[Documentation](https://docs.rs/constellation)
+
+### Similar Projects
+* [Specs](https://github.com/slide-rs/specs)
+* [ecs-rs](https://github.com/HeroesGrave/ecs-rs)
+
 # Examples
 
 Defining Resources:
