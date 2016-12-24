@@ -2,19 +2,25 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::fmt;
 use crossbeam::sync::SegQueue;
 
+/// Only one entity with a given index may be alive at a time.
 pub type Index = u32;
+
+/// Generation is incremented each time an index is re-used.
 pub type Generation = u8;
 
+/// A handle is formed out of an Index and a Generation
 pub trait Handle<TIndex, TGeneration> : Clone + Copy + fmt::Display {
+    /// Constructs a new handle.
     fn new(index: TIndex, generation: TGeneration) -> Self;
+
+    /// Gets the index component of the handle.
     fn index(&self) -> TIndex;
+
+    /// Gets the generation component of the handle.
     fn generation(&self) -> TGeneration;
 }
 
 /// A handle onto an entity in a scene.
-///
-/// An entity handle is opaque data understandable onto to the `EntityManager` and used as a key
-/// when attaching components to an entity.
 #[derive(PartialEq, Eq, Debug, Copy, Clone, Hash)]
 pub struct Entity(u32);
 
@@ -45,15 +51,17 @@ impl fmt::Display for Entity {
     }
 }
 
+/// Manages the allocation and delection of `Entity` IDs.
 pub struct Entities {
     free_count_approx: AtomicUsize,
     allocated: AtomicUsize,
     generations: Vec<Generation>,
     free: SegQueue<Index>,
-    deleted_pool: SegQueue<Vec<Index>>
+    deleted_pool: SegQueue<Vec<Entity>>
 }
 
 impl Entities {
+    /// Constructs a new `Entities`.
     pub fn new() -> Entities {
         Entities {
             generations: Vec::new(),
@@ -64,6 +72,8 @@ impl Entities {
         }
     }
 
+    /// Creates a new `Entity`. Allocated entities cannot be deleted until after
+    /// `commit_allocations` has been called.
     pub fn allocate(&self) -> Entity {
         if self.free_count_approx.load(Ordering::Relaxed) > MINIMUM_FREE_INDICES {
             if let Some(index) = self.free.try_pop() {
@@ -77,6 +87,7 @@ impl Entities {
         return Entity::new(index as Index, 0 as Generation);
     }
 
+    /// Determines if the specified `Entity` is still alive.
     pub fn is_alive(&self, entity: &Entity) -> bool {
         let index = entity.index() as usize;
         match self.generations.get(index) {
@@ -85,10 +96,12 @@ impl Entities {
         }
     }
 
+    /// Gets the count of currently allocated entities.
     pub fn count(&self) -> usize {
         self.allocated.load(Ordering::Relaxed)
     }
 
+    /// Gets the currently living `Entity` with the given `Index`.
     pub fn by_index(&self, index: Index) -> Entity {
         match self.generations.get(index as usize) {
             Some(&g) => Entity::new(index, g),
@@ -96,6 +109,9 @@ impl Entities {
         }
     }
 
+    /// Creates a new entity transaction. Transactions can be used to allocate or delete
+    /// entities in multiple threads concurrently. Entity deletions are comitted with the
+    /// transaction is merged via `merge`.
     pub fn transaction(&self) -> EntitiesTransaction {
         EntitiesTransaction {
             entities: self,
@@ -106,16 +122,17 @@ impl Entities {
         }
     }
 
+    /// Merges a set of entity transactions, comitting their allocations and delections.
     pub fn merge<T: Iterator<Item=EntityChangeSet>>(&mut self, changes: T) {
         self.commit_allocations();
 
         let mut freed = 0;
         for set in changes {
             let mut deleted = set.deleted;
-            for i in deleted.drain(..) {
-                let index = i as usize;
+            for e in deleted.drain(..) {
+                let index = e.index() as usize;
                 self.generations[index] = self.generations[index] + 1;
-                self.free.push(i);
+                self.free.push(e.index());
                 freed = freed + 1;
             }
 
@@ -134,32 +151,47 @@ impl Entities {
     }
 }
 
+/// An entity transaction allows concurrent creations and deletions of entities from an `Entities`.
 pub struct EntitiesTransaction<'a> {
     entities: &'a Entities,
-    deleted: Vec<Index>
+    deleted: Vec<Entity>
 }
 
+/// Summarises the final changes made during the lifetime of an entity transaction.
 pub struct EntityChangeSet {
-    pub deleted: Vec<Index>
+    /// The entities deleted in the transaction.
+    pub deleted: Vec<Entity>
 }
 
 impl<'a> EntitiesTransaction<'a> {
+    /// Creates a new `Entity`.
+    ///
+    /// This `Entity` can immediately be used to register data with resources,
+    /// and the calling system may destroy the entity, but other systems running
+    /// concurrently will not observe the entity's creation.
     pub fn create(&mut self) -> Entity {
         self.entities.allocate()
     }
 
+    /// Destroys an `Entity`.
+    ///
+    /// Entity destructions are deferred until after the system has completed execution.
+    /// All related data stored in entity resources will also be removed at this time.
     pub fn destroy(&mut self, entity: Entity) {
-        self.deleted.push(entity.index());
+        self.deleted.push(entity);
     }
 
+    /// Determines if the given `Entity` is still alive.
     pub fn is_alive(&self, entity: &Entity) -> bool {
         self.entities.is_alive(entity)
     }
 
+    /// Gets the currently living `Entity` with the given `Index`.
     pub fn by_index(&self, index: Index) -> Entity {
         self.entities.by_index(index)
     }
 
+    /// Converts this transaction into a change set, consuming the transaction in the process.
     pub fn to_change_set(self) -> EntityChangeSet {
         EntityChangeSet {
             deleted: self.deleted

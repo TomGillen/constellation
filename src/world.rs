@@ -11,6 +11,7 @@ use arrayvec::ArrayVec;
 use entities::*;
 use resource::*;
 
+/// Stores entities are resources, and provides mechanisms to update the world state via systems.
 pub struct World {
     entities: Entities,
     resources: FnvHashMap<TypeId, (u8, UnsafeCell<BoxedResource>)>,
@@ -27,6 +28,7 @@ enum BoxedResource {
 unsafe impl Sync for World {}
 
 impl World {
+    /// Constructs a new `World`.
     pub fn new() -> World {
         World {
             entities: Entities::new(),
@@ -36,6 +38,7 @@ impl World {
         }
     }
 
+    /// Registers a new resource with the `World`, allowing systems to access the resource.
     pub fn register_resource<T: Resource>(&mut self, resource: T) -> u8 {
         let type_id = TypeId::of::<T>();
         let boxed = BoxedResource::Resource(Box::new(resource) as Box<Resource>);
@@ -45,6 +48,13 @@ impl World {
         id
     }
 
+    /// Registers a new entity resource with the `World`, allowing systems to access the resource.
+    ///
+    /// Entity resources store per-entity data. The world will automatically clear relevant
+    /// entity data from all entity resources when an entity is destroyed.
+    ///
+    /// The IDs of all entities with data stored in a set of entity resources can be iterated
+    /// through via the `iter_entities_r*w*` functions.
     pub fn register_entity_resource<T: EntityResource>(&mut self, resource: T) -> u8 {
         let type_id = TypeId::of::<T>();
         let boxed = BoxedResource::EntityResource(Box::new(resource) as Box<StoresEntityData>);
@@ -56,13 +66,13 @@ impl World {
     }
 
     // Can only be safely called from within a system, and only for the resources the system declares
-    fn get_resource<T: Resource>(&self) -> Option<(u8, &T)> {
+    unsafe fn get_resource<T: Resource>(&self) -> Option<(u8, &T)> {
         let type_id = TypeId::of::<T>();
         if let Some(&(id, ref resource)) = self.resources.get(&type_id) {
-            let borrow = unsafe { &*resource.get() };
+            let borrow = &*resource.get();
             let resource = match borrow {
-                &BoxedResource::Resource(ref res) => unsafe { res.downcast_ref_unsafe::<T>() },
-                &BoxedResource::EntityResource(ref res) => unsafe { res.downcast_ref_unsafe::<T>() }
+                &BoxedResource::Resource(ref res) => res.downcast_ref_unsafe::<T>(),
+                &BoxedResource::EntityResource(ref res) => res.downcast_ref_unsafe::<T>()
             };
             return Some((id, resource));
         }
@@ -70,13 +80,13 @@ impl World {
     }
 
     // Can only be safely called from within a system, and only for the resources the system declares
-    fn get_resource_mut<T: Resource>(&self) -> Option<(u8, &mut T)> {
+    unsafe fn get_resource_mut<T: Resource>(&self) -> Option<(u8, &mut T)> {
         let type_id = TypeId::of::<T>();
         if let Some(&(id, ref resource)) = self.resources.get(&type_id) {
-            let borrow = unsafe { &mut *resource.get() };
+            let borrow = &mut *resource.get();
             let resource = match borrow {
-                &mut BoxedResource::Resource(ref mut res) => unsafe { res.downcast_mut_unsafe::<T>() },
-                &mut BoxedResource::EntityResource(ref mut res) => unsafe { res.downcast_mut_unsafe::<T>() }
+                &mut BoxedResource::Resource(ref mut res) => res.downcast_mut_unsafe::<T>(),
+                &mut BoxedResource::EntityResource(ref mut res) => res.downcast_mut_unsafe::<T>()
             };
             return Some((id, resource));
         }
@@ -126,21 +136,25 @@ impl<T: FnMut(&World) -> EntityChangeSet + Send> System for FnSystem<T> {
     }
 }
 
+/// Records system executions, to be run later within a `World`.
 pub struct SystemCommandBuffer {
     batches: Vec<Vec<Box<System>>>
 }
 
+/// Systems queued within a `SystemScope` may be scheduled to run in parallel.
 pub struct SystemScope {
     systems: Vec<Box<System>>
 }
 
 impl SystemCommandBuffer {
+    /// Constructs a new `SystemCommandBuffer`.
     pub fn new() -> SystemCommandBuffer {
         SystemCommandBuffer {
             batches: Vec::new()
         }
     }
 
+    /// Queues a sequence of systems into the command buffer. Each system may be run concurrently.
     pub fn queue_systems<'a, F, R>(&mut self, f: F) -> R
         where F: FnOnce(&mut SystemScope) -> R + 'a
     {
@@ -181,7 +195,7 @@ fn can_batch_system(reading: &HashSet<TypeId>, writing: &HashSet<TypeId>, (syste
 }
 
 impl SystemScope {
-    pub fn new() -> SystemScope {
+    fn new() -> SystemScope {
         SystemScope {
             systems: Vec::new()
         }
@@ -191,6 +205,10 @@ impl SystemScope {
 macro_rules! impl_run_system {
     ($name:ident [$($read:ident),*] [$($write:ident),*]) => (
         impl SystemScope {
+            /// Queues a new system into the command buffer.
+            ///
+            /// Each system queued within a single `SystemScope` may be executed in parallel
+            /// with each other. See crate documentation for more information.
             #[allow(non_snake_case, unused_variables, unused_mut)]
             pub fn $name<$($read,)* $($write,)* F>(&mut self, mut f: F) -> u32
                 where $($read:Resource,)*
@@ -198,8 +216,9 @@ macro_rules! impl_run_system {
                       F: for<'a, 'b> FnMut(&'a mut EntitiesTransaction<'b>, $(&'b $read,)* $(&'b mut $write,)*) + Send + 'static
             {
                 let system = move |world: &World| {
-                    $(let (_, $read) = world.get_resource::<$read>().expect("World does not contain required resource");)*
-                    $(let (_, mut $write) = world.get_resource_mut::<$write>().expect("World does not contain required resource");)*
+                    // safety of these gets is ensured by the system scheduler
+                    $(let (_, $read) = unsafe { world.get_resource::<$read>().expect("World does not contain required resource") };)*
+                    $(let (_, mut $write) = unsafe { world.get_resource_mut::<$write>().expect("World does not contain required resource") };)*
 
                     let mut tx = world.entities.transaction();
                     f(&mut tx, $($read.deref(),)* $($write.deref_mut(),)*);
@@ -257,12 +276,21 @@ impl_run_system!(run_r4w3 [R0, R1, R2, R3] [W0, W1, W2]);
 impl_run_system!(run_r5w3 [R0, R1, R2, R3, R4] [W0, W1, W2]);
 impl_run_system!(run_r6w3 [R0, R1, R2, R3, R4, R5] [W0, W1, W2]);
 
+/// Determines the behavior entity transaction commits when running a
+/// system command buffer sequentially.
 pub enum SequentialExecute {
+    /// Entity creations and delections are always comitted after each system,
+    /// guarenteeing that delections will always be observed by later queued systems.
+    /// This does not always result in the same behavior as parallel command buffer execution.
     SequentialCommit,
+    /// Entity creations and delections are always comitted in the same batches that would
+    /// otherwise had been scheduled for parallel execution had the command buffer been executed
+    /// in parallel. This emulates the same behavior as parallel command buffer execution.
     ParallelBatchedCommit
 }
 
 impl World {
+    /// Executes a `SystemCommandBuffer`, potentially scheduling systems for parallel execution.
     pub fn run(&mut self, systems: &mut SystemCommandBuffer) {
         self.execute_batched(systems, |world, batch, changes| {
             batch.par_iter_mut()
@@ -272,6 +300,7 @@ impl World {
         });
     }
 
+    /// Executes a `SystemCommandBuffer` sequentially.
     pub fn run_sequential(&mut self, systems: &mut SystemCommandBuffer, mode: SequentialExecute) {
         match mode {
             SequentialExecute::SequentialCommit => self.run_sequential_sc(systems),
@@ -371,7 +400,7 @@ mod tests {
         let mut world = World::new();
         world.register_resource(TestResource { x: 1 });
 
-        let (_, test) = world.get_resource::<TestResource>().unwrap();
+        let (_, test) = unsafe { world.get_resource::<TestResource>().unwrap() };
         assert_eq!(test.x, 1);
     }
 
@@ -380,7 +409,7 @@ mod tests {
         let mut world = World::new();
         world.register_resource(TestResource { x: 1 });
 
-        let (_, mut test) = world.get_resource_mut::<TestResource>().unwrap();
+        let (_, mut test) = unsafe { world.get_resource_mut::<TestResource>().unwrap() };
         assert_eq!(test.x, 1);
         test.x = 2;
     }
@@ -453,7 +482,7 @@ mod tests {
 
     #[test]
     fn run_system_exclusive_write_parallel() {
-        //for _ in 0..1000 {
+        for _ in 0..1000 {
             let mut world = World::new();
             world.register_resource(TestResource { x: 1 });
             world.register_resource(TestResource2 {});
@@ -461,20 +490,16 @@ mod tests {
             let mut buffer = SystemCommandBuffer::new();
             let (a, b, c, d) = buffer.queue_systems(|scope| {
                 let a = scope.run_r1w0(move |_, r: &TestResource| {
-                    println!("running a");
                     assert_eq!(r.x, 1);
                 });
                 let b = scope.run_r1w0(move |_, r: &TestResource| {
-                    println!("running b");
                     assert_eq!(r.x, 1);
                 });
                 let c = scope.run_r1w1(|_, _: &TestResource2, w: &mut TestResource| {
-                    println!("running c");
                     assert_eq!(w.x, 1);
                     w.x = 2;
                 });
                 let d = scope.run_r1w0(move |_, r: &TestResource| {
-                    println!("running d");
                     assert_eq!(r.x, 2);
                 });
 
@@ -491,7 +516,7 @@ mod tests {
             assert_eq!(buffer.batches[2][0].id(), d);
 
             world.run(&mut buffer);
-        //}
+        }
     }
 
     #[test]
@@ -631,16 +656,16 @@ mod tests {
                 println!("Creating entities");
                 for i in 0..1000 {
                     let e = tx.create();
-                    resource.add(e.index(), i);
+                    resource.add(e, i);
                 }
                 println!("Entities created");
             });
 
-            scope.run_r1w0(|_, resource: &VecResource<u32>| {
+            scope.run_r1w0(|entities, resource: &VecResource<u32>| {
                 println!("Verifying entity creation");
                 iter_entities_r1w0(resource, |iter, r| {
-                    for e in iter {
-                        assert_eq!(e, *r.get(e).unwrap());
+                    for i in iter {
+                        assert_eq!(i, *r.get(entities.by_index(i)).unwrap());
                     }
                 });
                 println!("Verified entity creation");
@@ -650,8 +675,8 @@ mod tests {
                 println!("Deleting entities");
                 let mut entities = Vec::<Index>::new();
                 iter_entities_r1w0(resource, |iter, _| {
-                    for e in iter {
-                        entities.push(e);
+                    for i in iter {
+                        entities.push(i);
                     }
                 });
 

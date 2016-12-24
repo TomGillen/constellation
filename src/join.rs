@@ -2,6 +2,8 @@
 // https://github.com/slide-rs/specs/
 // Appache 2.0 License
 
+#![allow(missing_docs)]
+
 use tuple_utils::Split;
 use bitset::{BitSetAnd, BitSetLike};
 

@@ -1,7 +1,7 @@
 use std::ops::{Deref, DerefMut};
 use std::collections::hash_map;
 use std::collections::hash_map::{Values, ValuesMut};
-use std::slice;
+use std::slice::{Iter, IterMut};
 use std::any::Any;
 
 use fnv::FnvHashMap;
@@ -10,6 +10,7 @@ use entities::*;
 use bitset::*;
 use join::*;
 
+/// A resource whos system access is controlled by the `World`.
 pub trait Resource : Any + Send + Sync { }
 
 impl Resource {
@@ -28,8 +29,10 @@ impl Resource {
     }
 }
 
+/// An entity resource is a resource which stores data about entities.
 pub trait StoresEntityData : Send + Sync {
-    fn clear(&mut self, &[Index]);
+    /// Removes all data pertaining to the given entities from the resource.
+    fn clear(&mut self, &[Entity]);
 }
 
 impl StoresEntityData {
@@ -48,19 +51,32 @@ impl StoresEntityData {
     }
 }
 
+/// An entity resource is a resource which stores data about entities.
 pub trait EntityResource : Resource + StoresEntityData {
     //type Filter: BitSetLike;
+
+    /// The type of API used to access the resource while its filter is write-locked behind a borrow.
     type Api;
 
     // fn deconstruct(&self) -> (&Self::Filter, &Self::Api);
     // fn deconstruct_mut(&mut self) -> (&Self::Filter, &mut Self::Api);
 
+    /// Splits the entity resource into a bitset used for entity iteration, and its restricted API.
     fn deconstruct(&self) -> (&BitSet, &Self::Api);
+
+    /// Splits the entity resource into a bitset used for entity iteration, and its restricted API.
     fn deconstruct_mut(&mut self) -> (&BitSet, &mut Self::Api);
 }
 
 macro_rules! impl_iter_entities {
     ($name:ident [$($read:ident),*] [$($write:ident),*] [$iter:ty]) => (
+        /// Constructs an iterator which yields the index of each entity with data stored
+        /// in all given entity resources.
+        ///
+        /// This function borrows each resource, preventing mutation of the resource for the
+        /// duration of its' scope. However, the user is provided with restricted APIs for each
+        /// resource which may allow mutable access to entity data stored within the resource,
+        /// without allowing any operations which would invalidate the entity iterator.
         #[allow(non_snake_case)]
         pub fn $name<'a, $($read,)* $($write,)* F, R>($($read: &$read,)* $($write: &mut $write,)* f: F) -> R
             where $($read:EntityResource,)*
@@ -110,12 +126,17 @@ impl_iter_entities!(iter_entities_r4w3 [R0, R1, R2, R3] [W1, W2, W3] [BitIter<Bi
 //     f(iter, r1_api, w1_api);
 // }
 
+/// A `MapResource` stores per-entity data in a `HashMap`.
+///
+/// This entity resource is suitable for data which is only present for a small portion of the
+/// total entities in the `World`.
 pub struct MapResource<T: Any + Send + Sync> {
     filter: BitSet,
     storage: MapStorage<T>
 }
 
 impl<T: Any + Send + Sync> MapResource<T> {
+    /// Constructs a new `MapResource`.
     pub fn new() -> MapResource<T> {
         MapResource {
             filter: BitSet::new(),
@@ -123,18 +144,19 @@ impl<T: Any + Send + Sync> MapResource<T> {
         }
     }
 
-    pub fn add(&mut self, entity: Index, component: T) {
+    /// Adds entity data to the resource.
+    pub fn add(&mut self, entity: Entity, component: T) {
         self.storage.m.insert(entity, component);
-        self.filter.add(entity);
+        self.filter.add(entity.index());
     }
 
-    pub fn remove(&mut self, entity: Index) -> Option<T> {
-        let result = self.storage.m.remove(&entity);
-        if result.is_some() {
-            self.filter.remove(entity);
+    /// Removes entity data from the resource.
+    pub fn remove(&mut self, entity: Entity) -> Option<T> {
+        let component = self.storage.m.remove(&entity);
+        if component.is_some() {
+            self.filter.remove(entity.index());
         }
-
-        result
+        return component;
     }
 }
 
@@ -154,7 +176,7 @@ impl<T: Any + Send + Sync> EntityResource for MapResource<T> {
 }
 
 impl<T: Any + Send + Sync> StoresEntityData for MapResource<T> {
-    fn clear(&mut self, entities: &[Index]) {
+    fn clear(&mut self, entities: &[Entity]) {
         for entity in entities {
             self.remove(*entity);
         }
@@ -175,42 +197,54 @@ impl<T: Any + Send + Sync> DerefMut for MapResource<T> {
     }
 }
 
+/// Provides methods to retrieve and mutate entity data stored inside a `MapResource`.
 pub struct MapStorage<T> {
-    m: FnvHashMap<Index, T>
+    m: FnvHashMap<Entity, T>
 }
 
 impl<T> MapStorage<T> {
-    pub fn new() -> MapStorage<T> {
+    fn new() -> MapStorage<T> {
         MapStorage {
             m: FnvHashMap::default()
         }
     }
 
-    pub fn get(&self, entity: Index) -> Option<&T> {
+    /// Gets an immutable reference to entity data.
+    pub fn get(&self, entity: Entity) -> Option<&T> {
         self.m.get(&entity)
     }
 
-    pub fn get_mut(&mut self, entity: Index) -> Option<&mut T> {
+    /// Gets a mutable reference to entity data.
+    pub fn get_mut(&mut self, entity: Entity) -> Option<&mut T> {
         self.m.get_mut(&entity)
     }
 
-    pub fn components(&self) -> Values<Index, T> {
+    /// Gets an iterator over all entity data stored in the resource.
+    pub fn components(&self) -> Values<Entity, T> {
         self.m.values()
     }
 
-    pub fn components_mut(&mut self) -> ValuesMut<Index, T> {
+    /// Gets an iterator over all entity data stored in the resource.
+    pub fn components_mut(&mut self) -> ValuesMut<Entity, T> {
         self.m.values_mut()
     }
 
-    pub fn iter(&self) -> hash_map::Iter<Index, T> {
+    /// Gets an iterator over all entity data stored in the resource.
+    pub fn iter(&self) -> hash_map::Iter<Entity, T> {
         self.m.iter()
     }
 
-    pub fn iter_mut(&mut self) -> hash_map::IterMut<Index, T> {
+    /// Gets an iterator over all entity data stored in the resource.
+    pub fn iter_mut(&mut self) -> hash_map::IterMut<Entity, T> {
         self.m.iter_mut()
     }
 }
 
+/// A `VecResource` stores per-entity data in a `Vec`.
+///
+/// This entity resource is suitable for data which is present for almost all of the
+/// total entities in the `World`. The `VecResource` provides fast sequential access as
+/// long as it maintains high occupancy.
 pub struct VecResource<T: Any + Send + Sync> {
     filter: BitSet,
     storage: VecStorage<T>
@@ -219,6 +253,7 @@ pub struct VecResource<T: Any + Send + Sync> {
 impl<T: Any + Send + Sync> Resource for VecResource<T> { }
 
 impl<T: Any + Send + Sync> VecResource<T> {
+    /// Constructs a new `VecResource`.
     pub fn new() -> VecResource<T> {
         VecResource {
             filter: BitSet::new(),
@@ -226,34 +261,50 @@ impl<T: Any + Send + Sync> VecResource<T> {
         }
     }
 
-    pub fn add(&mut self, entity: Index, component: T) {
-        let index = entity as usize;
+    /// Adds entity data to the resource.
+    pub fn add(&mut self, entity: Entity, component: T) {
+        use std::ptr;
+
+        let index = entity.index() as usize;
+
+        // expand storage if needed
         if self.storage.v.len() <= index {
-            //self.storage.v.resize(index + 1, None);
             let additional = index - self.storage.v.len() + 1;
+
+            // we leave the extra memory uninitialized
             self.storage.v.reserve(additional);
+            unsafe { self.storage.v.set_len(index + 1); }
+
+            self.storage.g.reserve(additional);
             for _ in 0..additional {
-                self.storage.v.push(None);
+                self.storage.g.push(None);
             }
         }
 
-        self.storage.v[index] = Some(component);
-        self.filter.add(entity);
+        if self.storage.g[index] != None {
+            panic!("VecResource already contains entity data for index {}", index);
+        }
+
+        // copy the component into the array without reading/dropping the existing (uninitialized) value
+        unsafe { ptr::write(self.storage.v.get_unchecked_mut(index), component); }
+        self.storage.g[index] = Some(entity.generation());
+        self.filter.add(entity.index());
     }
 
-    pub fn remove(&mut self, entity: Index) -> Option<T> {
-        let index = entity as usize;
-        if self.storage.v.len() <= index {
+    /// Removes entity data from the resource.
+    pub fn remove(&mut self, entity: Entity) -> Option<T> {
+        use std::ptr;
+
+        let index = entity.index() as usize;
+        if self.storage.v.len() <= index || self.storage.g[index] != Some(entity.generation()) {
             return None;
         }
 
-        self.storage.v.push(None);
-        let component = self.storage.v.swap_remove(index);
-        if component.is_some() {
-            self.filter.remove(entity);
-        }
+        self.filter.remove(entity.index());
+        self.storage.g[index] = None;
 
-        return component;
+        // copy the component out of thr array - we will now treat this slot as unitialized
+        Some(unsafe {ptr::read(&self.storage.v[index]) })
     }
 }
 
@@ -271,7 +322,7 @@ impl<T: Any + Send + Sync> EntityResource for VecResource<T> {
 }
 
 impl<T: Any + Send + Sync> StoresEntityData for VecResource<T> {
-    fn clear(&mut self, entities: &[Index]) {
+    fn clear(&mut self, entities: &[Entity]) {
         for entity in entities {
             self.remove(*entity);
         }
@@ -292,103 +343,138 @@ impl<T: Any + Send + Sync> DerefMut for VecResource<T> {
     }
 }
 
+/// Provides methods to retrieve and mutate entity data stored inside a `VecResource`.
 pub struct VecStorage<T> {
-    v: Vec<Option<T>>
+    v: Vec<T>,
+    g: Vec<Option<Generation>>
 }
 
 impl<T> VecStorage<T> {
-    pub fn new() -> VecStorage<T> {
+    fn new() -> VecStorage<T> {
         VecStorage {
-            v: Vec::new()
+            v: Vec::new(),
+            g: Vec::new()
         }
     }
 
-    pub fn get(&self, entity: Index) -> Option<&T> {
-        if let Some(x) = self.v.get(entity as usize) {
-            return x.as_ref();
+    /// Gets an immutable reference to entity data.
+    pub fn get(&self, entity: Entity) -> Option<&T> {
+        let index = entity.index() as usize;
+        if self.g.len() > index && self.g[index] == Some(entity.generation()) {
+            return Some(&self.v[index]);
         }
-
         None
     }
 
+    /// Gets an immutable reference to entity data without performing bounds and liveness checks.
+    ///
+    /// # Safety
+    ///
+    /// This function performs no bounds checking. Requesting data for an entity index that
+    /// does not represent a living entity with data in this resource will return an undefined
+    /// result.
     #[inline]
-    pub unsafe fn get_unchecked(&self, entity: Index) -> &T {
-        self.v.get_unchecked(entity as usize).as_ref().unwrap()
+    pub unsafe fn get_unchecked(&self, index: Index) -> &T {
+        self.v.get_unchecked(index as usize)
     }
 
-    pub fn get_mut(&mut self, entity: Index) -> Option<&mut T> {
-        if let Some(x) = self.v.get_mut(entity as usize) {
-            return x.as_mut();
+    /// Gets a mutable reference to entity data.
+    pub fn get_mut(&mut self, entity: Entity) -> Option<&mut T> {
+        let index = entity.index() as usize;
+        if self.g.len() > index && self.g[index] == Some(entity.generation()) {
+            return Some(&mut self.v[index]);
         }
-
         None
     }
 
+    /// Gets a mutable reference to entity data without performing bounds and liveness checks.
+    ///
+    /// # Safety
+    ///
+    /// This function performs no bounds checking. Requesting data for an entity index that
+    /// does not represent a living entity with data in this resource will return an undefined
+    /// result.
     #[inline]
-    pub unsafe fn get_unchecked_mut(&mut self, entity: Index) -> &mut T {
-        self.v.get_unchecked_mut(entity as usize).as_mut().unwrap()
+    pub unsafe fn get_unchecked_mut(&mut self, index: Index) -> &mut T {
+        self.v.get_unchecked_mut(index as usize)
     }
 
+    /// Gets an iterator over immutable references to all entity data stored in the resource.
     pub fn iter(&self) -> VecStorageIter<T> {
         VecStorageIter {
-            iter: self.v.iter()
+            i: 0,
+            iter: self.v.iter(),
+            g: &self.g
         }
     }
 
+    /// Gets an iterator over mutable references to all entity data stored in the resource.
     pub fn iter_mut(&mut self) -> VecStorageIterMut<T> {
         VecStorageIterMut {
-            iter: self.v.iter_mut()
+            i: 0,
+            iter: self.v.iter_mut(),
+            g: &self.g
         }
     }
 }
 
+/// An iterator over entity data stored in a `VecResource`.
 pub struct VecStorageIter<'a, T: 'a> {
-    iter: slice::Iter<'a, Option<T>>
+    i: usize,
+    iter: Iter<'a, T>,
+    g: &'a [Option<Generation>]
 }
 
 impl<'a, T> Iterator for VecStorageIter<'a, T> {
-    type Item = &'a T;
+    type Item = (Entity, &'a T);
 
     #[inline]
-    fn next(&mut self) -> Option<&'a T> {
+    fn next(&mut self) -> Option<(Entity, &'a T)> {
         for x in self.iter.by_ref() {
-            if x.is_some() {
-                return x.as_ref();
+            let index = self.i;
+            self.i = self.i + 1;
+
+            if let Some(gen) = self.g[index] {
+                let entity = Entity::new(index as Index, gen);
+                return Some((entity, x));
             }
         }
-
         None
     }
 
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let (_, upper) = self.iter.size_hint();
-        (0, upper)
+        (0, Some(self.g.len()))
     }
 }
 
+/// An iterator over entity data stored in a `VecResource`.
 pub struct VecStorageIterMut<'a, T: 'a> {
-    iter: slice::IterMut<'a, Option<T>>
+    i: usize,
+    iter: IterMut<'a, T>,
+    g: &'a [Option<Generation>]
 }
 
 impl<'a, T> Iterator for VecStorageIterMut<'a, T> {
-    type Item = &'a mut T;
+    type Item = (Entity, &'a mut T);
 
     #[inline]
-    fn next(&mut self) -> Option<&'a mut T> {
+    fn next(&mut self) -> Option<(Entity, &'a mut T)> {
         for x in self.iter.by_ref() {
-            if x.is_some() {
-                return x.as_mut();
+            let index = self.i;
+            self.i = self.i + 1;
+
+            if let Some(gen) = self.g[index] {
+                let entity = Entity::new(index as Index, gen);
+                return Some((entity, x));
             }
         }
-
         None
     }
 
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let (_, upper) = self.iter.size_hint();
-        (0, upper)
+        (0, Some(self.g.len()))
     }
 }
 
@@ -403,12 +489,12 @@ mod tests {
         let map = &mut MapResource::<u32>::new();
         let entity = Entity::new(1, 0);
 
-        map.add(entity.index(), 5u32);
-        assert_eq!(*map.get(entity.index()).unwrap(), 5u32);
+        map.add(entity, 5u32);
+        assert_eq!(*map.get(entity).unwrap(), 5u32);
 
         let (bitset, api) = map.deconstruct();
         assert!(bitset.contains(entity.index()));
-        assert_eq!(*api.get(entity.index()).unwrap(), 5u32);
+        assert_eq!(*api.get(entity).unwrap(), 5u32);
     }
 
     #[test]
@@ -416,14 +502,14 @@ mod tests {
         let map = &mut MapResource::<u32>::new();
         let entity = Entity::new(1, 0);
 
-        map.add(entity.index(), 5u32);
-        assert_eq!(*map.get(entity.index()).unwrap(), 5u32);
+        map.add(entity, 5u32);
+        assert_eq!(*map.get(entity).unwrap(), 5u32);
 
         let (bitset, api) = map.deconstruct_mut();
         assert!(bitset.contains(entity.index()));
-        assert_eq!(*api.get(entity.index()).unwrap(), 5u32);
-        *api.get_mut(entity.index()).unwrap() = 6u32;
-        assert_eq!(*api.get(entity.index()).unwrap(), 6u32);
+        assert_eq!(*api.get(entity).unwrap(), 5u32);
+        *api.get_mut(entity).unwrap() = 6u32;
+        assert_eq!(*api.get(entity).unwrap(), 6u32);
     }
 
     #[test]
@@ -433,14 +519,14 @@ mod tests {
         let c = Entity::new(4, 0);
 
         let vec = &mut VecResource::<u32>::new();
-        vec.add(a.index(), 1);
-        vec.add(b.index(), 2);
-        vec.add(c.index(), 3);
+        vec.add(a, 1);
+        vec.add(b, 2);
+        vec.add(c, 3);
 
         let mut iter = vec.iter();
-        assert_eq!(iter.next(), Some(&1u32));
-        assert_eq!(iter.next(), Some(&2u32));
-        assert_eq!(iter.next(), Some(&3u32));
+        assert_eq!(iter.next(), Some((a, &1u32)));
+        assert_eq!(iter.next(), Some((b, &2u32)));
+        assert_eq!(iter.next(), Some((c, &3u32)));
     }
 
     #[test]
@@ -450,14 +536,14 @@ mod tests {
         let c = Entity::new(4, 0);
 
         let vec = &mut VecResource::<u32>::new();
-        vec.add(a.index(), 1);
-        vec.add(b.index(), 2);
-        vec.add(c.index(), 3);
+        vec.add(a, 1);
+        vec.add(b, 2);
+        vec.add(c, 3);
 
         let mut iter = vec.iter_mut();
-        assert_eq!(iter.next(), Some(&mut 1u32));
-        assert_eq!(iter.next(), Some(&mut 2u32));
-        assert_eq!(iter.next(), Some(&mut 3u32));
+        assert_eq!(iter.next(), Some((a, &mut 1u32)));
+        assert_eq!(iter.next(), Some((b, &mut 2u32)));
+        assert_eq!(iter.next(), Some((c, &mut 3u32)));
     }
 
     #[test]
@@ -467,23 +553,23 @@ mod tests {
         let c = Entity::new(4, 0);
 
         let vec = &mut VecResource::<u32>::new();
-        vec.add(a.index(), 1);
-        vec.add(b.index(), 2);
-        vec.add(c.index(), 3);
+        vec.add(a, 1);
+        vec.add(b, 2);
+        vec.add(c, 3);
 
         let map = &mut MapResource::<u32>::new();
-        map.add(a.index(), 1);
-        map.add(c.index(), 4);
+        map.add(a, 1);
+        map.add(c, 4);
 
         iter_entities_r1w1(map, vec, |iter, m, v| {
             for e in iter {
                 let x = unsafe { v.get_unchecked_mut(e) };
-                *x += *m.get(e).unwrap();
+                *x += *m.get(Entity::new(e, 0)).unwrap();
             }
         });
 
-        assert_eq!(vec.get(a.index()), Some(&2u32));
-        assert_eq!(vec.get(b.index()), Some(&2u32));
-        assert_eq!(vec.get(c.index()), Some(&7u32));
+        assert_eq!(vec.get(a), Some(&2u32));
+        assert_eq!(vec.get(b), Some(&2u32));
+        assert_eq!(vec.get(c), Some(&7u32));
     }
 }
