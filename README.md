@@ -16,7 +16,7 @@ executing the command buffer within a `World`.
 
 Defining Resources:
 
-```
+```rust
 // Per-entity position data.
 struct Position {
     x: f32,
@@ -42,7 +42,7 @@ world.register_entity_resource(DebugNames::new());
 
 Update the world with Systems:
 
-```
+```rust
 let mut update = SystemCommandBuffer::new();
 update.queue_systems(|scope| {
     scope.run_r1w1(|entities, velocities: &Velocities, positions: &mut Positions| {
