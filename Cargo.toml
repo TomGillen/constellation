@@ -6,7 +6,7 @@ description = "A data-oriented entity component system optimized for cache coher
 repository = "https://github.com/TomGillen/constellation/"
 documentation = "https://docs.rs/constellation"
 readme = "README.md"
-license = "Apache License 2.0"
+license = "Apache-2.0"
 keywords = ["game", "gamedev", "ecs"]
 
 [dependencies]
