@@ -50,7 +50,7 @@ world.register_entity_resource(DebugNames::new());
 Update the world with Systems:
 
 ```rust
-let mut update = SystemCommandBuffer::new();
+let mut update = SystemCommandBuffer::default();
 update.queue_systems(|scope| {
     scope.run_r1w1(|entities, velocities: &Velocities, positions: &mut Positions| {
         println!("Updating positions");
