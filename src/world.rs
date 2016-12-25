@@ -12,17 +12,79 @@ use arrayvec::ArrayVec;
 use entities::*;
 use resource::*;
 
+bitflags! {
+    flags ResourceDescription: u32 {
+        const ENTITY_DATA = 0b00000001
+    }
+}
+
+struct ResourceCell {
+    cell: UnsafeCell<Box<Resource>>,
+    type_id: TypeId,
+    desc: ResourceDescription
+}
+
+impl ResourceCell {
+    // pub unsafe fn get(&self) -> &Resource {
+    //     (&*self.cell.get()).deref()
+    // }
+
+    pub unsafe fn get_mut(&self) -> &mut Resource {
+        (&mut *self.cell.get()).deref_mut()
+    }
+
+    pub unsafe fn get_as<T: Resource>(&self) -> &T {
+        assert!(self.type_id == TypeId::of::<T>());
+        let borrow = &*self.cell.get();
+        borrow.downcast_ref_unsafe::<T>()
+    }
+
+    pub unsafe fn get_as_mut<T: Resource>(&self) -> &mut T {
+        assert!(self.type_id == TypeId::of::<T>());
+        let borrow = &mut *self.cell.get();
+        borrow.downcast_mut_unsafe::<T>()
+    }
+}
+
+/// Constructs and configures a world resource.
+pub struct ResourceBuilder<T: Resource> {
+    resource: T,
+    desc: ResourceDescription
+}
+
+impl<T: Resource> ResourceBuilder<T> {
+    /// Constructs a new `ResourceBuilder`.
+    pub fn new(resource: T) -> ResourceBuilder<T> {
+        ResourceBuilder {
+            resource: resource,
+            desc: ResourceDescription::empty()
+        }
+    }
+
+    fn to_resource_cell(self) -> ResourceCell {
+        ResourceCell {
+            cell: UnsafeCell::new(Box::new(self.resource)),
+            type_id: TypeId::of::<T>(),
+            desc: self.desc
+        }
+    }
+}
+
+impl<T: Resource + EntityResource> ResourceBuilder<T> {
+    /// Marks this resource as containing entity data which should be cleared when entities
+    /// are destroyed.
+    pub fn activate_entity_disposal(mut self) -> ResourceBuilder<T> {
+        self.desc.insert(ENTITY_DATA);
+        self
+    }
+}
+
 /// Stores entities are resources, and provides mechanisms to update the world state via systems.
 pub struct World {
     entities: Entities,
-    resources: FnvHashMap<TypeId, (u8, UnsafeCell<BoxedResource>)>,
+    resources: FnvHashMap<TypeId, (u8, ResourceCell)>,
     entity_resources: Vec<TypeId>,
     changes_buffer: Option<Vec<EntityChangeSet>>
-}
-
-enum BoxedResource {
-    Resource(Box<Resource>),
-    EntityResource(Box<StoresEntityData>)
 }
 
 // resource access is ensured safe by the system scheduler
@@ -40,41 +102,31 @@ impl World {
     }
 
     /// Registers a new resource with the `World`, allowing systems to access the resource.
-    pub fn register_resource<T: Resource>(&mut self, resource: T) -> u8 {
-        let type_id = TypeId::of::<T>();
-        let boxed = BoxedResource::Resource(Box::new(resource) as Box<Resource>);
+    pub fn register<T: Resource>(&mut self, builder: ResourceBuilder<T>) -> u8 {
+        let cell = builder.to_resource_cell();
+        let type_id = cell.type_id;
+
+        if cell.desc.contains(ENTITY_DATA) {
+            self.entity_resources.push(type_id);
+        }
+
         let id = self.resources.len() as u8;
-        let value = (id, UnsafeCell::new(boxed));
+        let value = (id, cell);
         self.resources.insert(type_id, value);
+
         id
     }
 
-    /// Registers a new entity resource with the `World`, allowing systems to access the resource.
-    ///
-    /// Entity resources store per-entity data. The world will automatically clear relevant
-    /// entity data from all entity resources when an entity is destroyed.
-    ///
-    /// The IDs of all entities with data stored in a set of entity resources can be iterated
-    /// through via the `iter_entities_r*w*` functions.
-    pub fn register_entity_resource<T: EntityResource>(&mut self, resource: T) -> u8 {
-        let type_id = TypeId::of::<T>();
-        let boxed = BoxedResource::EntityResource(Box::new(resource) as Box<StoresEntityData>);
-        let id = self.resources.len() as u8;
-        let value = (id, UnsafeCell::new(boxed));
-        self.resources.insert(type_id, value);
-        self.entity_resources.push(type_id);
-        id
+    /// Registers a new resource with the `World`, allowing systems to access the resource.
+    pub fn register_resource<T: Resource>(&mut self, resource: T) -> u8 {
+        self.register(resource.to_builder())
     }
 
     // Can only be safely called from within a system, and only for the resources the system declares
     unsafe fn get_resource<T: Resource>(&self) -> Option<(u8, &T)> {
         let type_id = TypeId::of::<T>();
         if let Some(&(id, ref resource)) = self.resources.get(&type_id) {
-            let borrow = &*resource.get();
-            let resource = match borrow {
-                &BoxedResource::Resource(ref res) => res.downcast_ref_unsafe::<T>(),
-                &BoxedResource::EntityResource(ref res) => res.downcast_ref_unsafe::<T>()
-            };
+            let resource = resource.get_as();
             return Some((id, resource));
         }
         return None;
@@ -84,24 +136,19 @@ impl World {
     unsafe fn get_resource_mut<T: Resource>(&self) -> Option<(u8, &mut T)> {
         let type_id = TypeId::of::<T>();
         if let Some(&(id, ref resource)) = self.resources.get(&type_id) {
-            let borrow = &mut *resource.get();
-            let resource = match borrow {
-                &mut BoxedResource::Resource(ref mut res) => res.downcast_mut_unsafe::<T>(),
-                &mut BoxedResource::EntityResource(ref mut res) => res.downcast_mut_unsafe::<T>()
-            };
+            let resource = resource.get_as_mut();
             return Some((id, resource));
         }
         return None;
     }
 
-    fn clean_deleted_entities(&mut self, changes: &[EntityChangeSet]) {
+    // Can only be safely called in between systems, on the main thread
+    unsafe fn clean_deleted_entities(&mut self, changes: &[EntityChangeSet]) {
         for id in self.entity_resources.iter() {
-            let &mut (_, ref mut cell) = self.resources.get_mut(&id).unwrap();
-            let resource: &mut BoxedResource = unsafe { &mut *cell.get() };
-            if let &mut BoxedResource::EntityResource(ref mut boxed) = resource {
-                for cs in changes.iter() {
-                    boxed.clear(&cs.deleted);
-                }
+            let &mut (_, ref mut resource) = self.resources.get_mut(&id).unwrap();
+            let resource = resource.get_mut();
+            for cs in changes.iter() {
+                resource.clear_entity_data(&cs.deleted);
             }
         }
     }
@@ -377,7 +424,7 @@ impl World {
         for batch in systems.batches.iter_mut() {
             for system in batch.iter_mut() {
                 let changes = [system.execute(self, state)];
-                self.clean_deleted_entities(&changes);
+                unsafe { self.clean_deleted_entities(&changes) };
                 self.entities.merge(ArrayVec::from(changes).into_iter());
             }
         }
@@ -395,7 +442,7 @@ impl World {
 
             f(self, batch, &mut changes);
 
-            self.clean_deleted_entities(&changes);
+            unsafe { self.clean_deleted_entities(&changes) };
             self.entities.merge(changes.drain(..));
         }
 
@@ -718,7 +765,7 @@ mod tests {
     #[test]
     fn clean_deleted_entities() {
         let mut world = World::new();
-        world.register_entity_resource(VecResource::<u32>::new());
+        world.register_resource(VecResource::<u32>::new());
 
         let mut buffer = SystemCommandBuffer::default();
         buffer.queue_systems(|scope| {

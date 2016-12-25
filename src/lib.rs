@@ -39,8 +39,8 @@
 //! type DebugNames = MapResource<DebugName>;
 //!
 //! let mut world = World::new();
-//! world.register_entity_resource(Positions::new());
-//! world.register_entity_resource(DebugNames::new());
+//! world.register_resource(Positions::new());
+//! world.register_resource(DebugNames::new());
 //! ```
 //!
 //! Update the world with Systems:
@@ -68,9 +68,9 @@
 //! # type DebugNames = MapResource<DebugName>;
 //! #
 //! # let mut world = World::new();
-//! # world.register_entity_resource(Positions::new());
-//! # world.register_entity_resource(Velocities::new());
-//! # world.register_entity_resource(DebugNames::new());
+//! # world.register_resource(Positions::new());
+//! # world.register_resource(Velocities::new());
+//! # world.register_resource(DebugNames::new());
 //! let mut update = SystemCommandBuffer::default();
 //! update.queue_systems(|scope| {
 //!     scope.run_r1w1(|entities, velocities: &Velocities, positions: &mut Positions| {
@@ -134,6 +134,8 @@ extern crate rayon;
 extern crate arrayvec;
 extern crate atom;
 extern crate tuple_utils;
+#[macro_use]
+extern crate bitflags;
 
 mod entities;
 mod world;
@@ -169,8 +171,8 @@ mod tests {
     #[test]
     fn example() {
         let mut world = World::new();
-        world.register_entity_resource(Positions::new());
-        world.register_entity_resource(Velocities::new());
+        world.register_resource(Positions::new());
+        world.register_resource(Velocities::new());
 
         let mut setup = SystemCommandBuffer::default();
         setup.queue_systems(|scope| {

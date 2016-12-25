@@ -43,8 +43,8 @@ struct DebugName {
 type DebugNames = MapResource<DebugName>;
 
 let mut world = World::new();
-world.register_entity_resource(Positions::new());
-world.register_entity_resource(DebugNames::new());
+world.register_resource(Positions::new());
+world.register_resource(DebugNames::new());
 ```
 
 Update the world with Systems:

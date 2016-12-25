@@ -9,9 +9,18 @@ use fnv::FnvHashMap;
 use entities::*;
 use bitset::*;
 use join::*;
+use world::*;
 
 /// A resource whos system access is controlled by the `World`.
-pub trait Resource : Any + Send + Sync { }
+pub trait Resource : Any + Send + Sync {
+    /// Clears all data related to the given entities from the resource.
+    fn clear_entity_data(&mut self, &[Entity]) { }
+
+    /// Converts this resource into a `ResourceBuilder` for constructing itself.
+    fn to_builder(self) -> ResourceBuilder<Self> where Self: Sized {
+        ResourceBuilder::new(self)
+    }
+}
 
 impl Resource {
     /// Returns a reference to the boxed value, blindly assuming it to be of type `T`.
@@ -30,29 +39,7 @@ impl Resource {
 }
 
 /// An entity resource is a resource which stores data about entities.
-pub trait StoresEntityData : Send + Sync {
-    /// Removes all data pertaining to the given entities from the resource.
-    fn clear(&mut self, &[Entity]);
-}
-
-impl StoresEntityData {
-    /// Returns a reference to the boxed value, blindly assuming it to be of type `T`.
-    /// If you are not *absolutely certain* of `T`, you *must not* call this.
-    #[inline]
-    pub unsafe fn downcast_ref_unsafe<T>(&self) -> &T {
-        &*(self as *const Self as *const T)
-    }
-
-    /// Returns a reference to the boxed value, blindly assuming it to be of type `T`.
-    /// If you are not *absolutely certain* of `T`, you *must not* call this.
-    #[inline]
-    pub unsafe fn downcast_mut_unsafe<T>(&mut self) -> &mut T {
-        &mut *(self as *mut Self as *mut T)
-    }
-}
-
-/// An entity resource is a resource which stores data about entities.
-pub trait EntityResource : Resource + StoresEntityData {
+pub trait EntityResource : Resource {
     //type Filter: BitSetLike;
 
     /// The type of API used to access the resource while its filter is write-locked behind a borrow.
@@ -160,7 +147,17 @@ impl<T: Any + Send + Sync> MapResource<T> {
     }
 }
 
-impl<T: Any + Send + Sync> Resource for MapResource<T> { }
+impl<T: Any + Send + Sync> Resource for MapResource<T> {
+    fn clear_entity_data(&mut self, entities: &[Entity]) {
+        for entity in entities {
+            self.remove(*entity);
+        }
+    }
+
+    fn to_builder(self) -> ResourceBuilder<MapResource<T>> {
+        ResourceBuilder::new(self).activate_entity_disposal()
+    }
+}
 
 impl<T: Any + Send + Sync> EntityResource for MapResource<T> {
     //type Filter = BitSet;
@@ -172,14 +169,6 @@ impl<T: Any + Send + Sync> EntityResource for MapResource<T> {
 
     fn deconstruct_mut(&mut self) -> (&BitSet, &mut MapStorage<T>) {
         (&self.filter, &mut self.storage)
-    }
-}
-
-impl<T: Any + Send + Sync> StoresEntityData for MapResource<T> {
-    fn clear(&mut self, entities: &[Entity]) {
-        for entity in entities {
-            self.remove(*entity);
-        }
     }
 }
 
@@ -250,7 +239,17 @@ pub struct VecResource<T: Any + Send + Sync> {
     storage: VecStorage<T>
 }
 
-impl<T: Any + Send + Sync> Resource for VecResource<T> { }
+impl<T: Any + Send + Sync> Resource for VecResource<T> {
+    fn clear_entity_data(&mut self, entities: &[Entity]) {
+        for entity in entities {
+            self.remove(*entity);
+        }
+    }
+
+    fn to_builder(self) -> ResourceBuilder<VecResource<T>> {
+        ResourceBuilder::new(self).activate_entity_disposal()
+    }
+}
 
 impl<T: Any + Send + Sync> VecResource<T> {
     /// Constructs a new `VecResource`.
@@ -318,14 +317,6 @@ impl<T: Any + Send + Sync> EntityResource for VecResource<T> {
 
     fn deconstruct_mut(&mut self) -> (&BitSet, &mut VecStorage<T>) {
         (&self.filter, &mut self.storage)
-    }
-}
-
-impl<T: Any + Send + Sync> StoresEntityData for VecResource<T> {
-    fn clear(&mut self, entities: &[Entity]) {
-        for entity in entities {
-            self.remove(*entity);
-        }
     }
 }
 
