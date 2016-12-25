@@ -71,7 +71,7 @@
 //! # world.register_entity_resource(Positions::new());
 //! # world.register_entity_resource(Velocities::new());
 //! # world.register_entity_resource(DebugNames::new());
-//! let mut update = SystemCommandBuffer::new();
+//! let mut update = SystemCommandBuffer::default();
 //! update.queue_systems(|scope| {
 //!     scope.run_r1w1(|entities, velocities: &Velocities, positions: &mut Positions| {
 //!         println!("Updating positions");
@@ -172,7 +172,7 @@ mod tests {
         world.register_entity_resource(Positions::new());
         world.register_entity_resource(Velocities::new());
 
-        let mut setup = SystemCommandBuffer::new();
+        let mut setup = SystemCommandBuffer::default();
         setup.queue_systems(|scope| {
             scope.run_r0w2(|tx, velocities: &mut Velocities, positions: &mut Positions| {
                 for i in 0..1000 {
@@ -186,7 +186,7 @@ mod tests {
 
         world.run(&mut setup);
 
-        let mut update = SystemCommandBuffer::new();
+        let mut update = SystemCommandBuffer::default();
         update.queue_systems(|scope| {
             scope.run_r1w1(|_, velocities: &Velocities, positions: &mut Positions| {
                 println!("Updating positions");

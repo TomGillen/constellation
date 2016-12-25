@@ -3,6 +3,7 @@ use std::ops::{Deref, DerefMut};
 use std::any::TypeId;
 use std::cell::UnsafeCell;
 use std::mem;
+use std::marker::PhantomData;
 
 use rayon::prelude::*;
 use fnv::FnvHashMap;
@@ -106,20 +107,52 @@ impl World {
     }
 }
 
-trait System : Send {
+trait System<S: Send + Sync + 'static> : Send {
     fn id(&self) -> u32;
     fn resource_access(&self) -> (&HashSet<TypeId>, &HashSet<TypeId>);
-    fn execute(&mut self, &World) -> EntityChangeSet;
+    fn execute(&mut self, &World, &S) -> EntityChangeSet;
 }
 
-struct FnSystem<T: FnMut(&World) -> EntityChangeSet + Send> {
+/// Contains system execution state information.
+pub struct SystemContext<'a, S: Send + Sync + 'static> {
+    entities: EntitiesTransaction<'a>,
+    state: &'a S
+}
+
+impl<'a, S: Send + Sync + 'static> Deref for SystemContext<'a, S> {
+    type Target = EntitiesTransaction<'a>;
+
+    fn deref(&self) -> &EntitiesTransaction<'a> {
+        &self.entities
+    }
+}
+
+impl<'a, S: Send + Sync + 'static> DerefMut for SystemContext<'a, S> {
+    fn deref_mut(&mut self) -> &mut EntitiesTransaction<'a> {
+        &mut self.entities
+    }
+}
+
+impl<'a, S: Send + Sync + 'static> SystemContext<'a, S> {
+    /// Gets the current system execution state.
+    pub fn state(&self) -> &S {
+        self.state
+    }
+
+    fn to_change_set(self) -> EntityChangeSet {
+        self.entities.to_change_set()
+    }
+}
+
+struct FnSystem<S, F> where F: FnMut(&World, &S) -> EntityChangeSet + Send, S: Send + Sync + 'static {
     id: u32,
     read: HashSet<TypeId>,
     write: HashSet<TypeId>,
-    f: T
+    f: F,
+    phantom: PhantomData<&'static S>
 }
 
-impl<T: FnMut(&World) -> EntityChangeSet + Send> System for FnSystem<T> {
+impl<S: Send + Sync + 'static, T: FnMut(&World, &S) -> EntityChangeSet + Send> System<S> for FnSystem<S, T> {
     #[inline]
     fn id(&self) -> u32 {
         self.id
@@ -131,24 +164,31 @@ impl<T: FnMut(&World) -> EntityChangeSet + Send> System for FnSystem<T> {
     }
 
     #[inline]
-    fn execute(&mut self, world: &World) -> EntityChangeSet {
-        (self.f)(&world)
+    fn execute(&mut self, world: &World, state: &S) -> EntityChangeSet {
+        (self.f)(world, state)
     }
 }
 
 /// Records system executions, to be run later within a `World`.
-pub struct SystemCommandBuffer {
-    batches: Vec<Vec<Box<System>>>
+pub struct SystemCommandBuffer<S: Send + Sync + 'static = ()> {
+    batches: Vec<Vec<Box<System<S>>>>
 }
 
 /// Systems queued within a `SystemScope` may be scheduled to run in parallel.
-pub struct SystemScope {
-    systems: Vec<Box<System>>
+pub struct SystemScope<S: Send + Sync + 'static> {
+    systems: Vec<Box<System<S>>>
 }
 
-impl SystemCommandBuffer {
+impl SystemCommandBuffer<()> {
+    /// Constructs a new 'SystemCommandBuffer' with an empty state.
+    pub fn default() -> SystemCommandBuffer<()> {
+        SystemCommandBuffer::new()
+    }
+}
+
+impl<S: Send + Sync + 'static> SystemCommandBuffer<S> {
     /// Constructs a new `SystemCommandBuffer`.
-    pub fn new() -> SystemCommandBuffer {
+    pub fn new() -> SystemCommandBuffer<S> {
         SystemCommandBuffer {
             batches: Vec::new()
         }
@@ -156,20 +196,20 @@ impl SystemCommandBuffer {
 
     /// Queues a sequence of systems into the command buffer. Each system may be run concurrently.
     pub fn queue_systems<'a, F, R>(&mut self, f: F) -> R
-        where F: FnOnce(&mut SystemScope) -> R + 'a
+        where F: FnOnce(&mut SystemScope<S>) -> R + 'a
     {
         let mut scope = SystemScope::new();
         let result = f(&mut scope);
 
         let mut reading = HashSet::<TypeId>::new();
         let mut writing = HashSet::<TypeId>::new();
-        let mut batch = Vec::<Box<System>>::new();
+        let mut batch = Vec::<Box<System<S>>>::new();
         for system in scope.systems.into_iter() {
             {
                 let (system_reading, system_writing) = system.resource_access();
                 if !can_batch_system(&reading, &writing, (system_reading, system_writing)) {
                     self.batches.push(batch);
-                    batch = Vec::<Box<System>>::new();
+                    batch = Vec::<Box<System<S>>>::new();
                     reading.clear();
                     writing.clear();
                 }
@@ -194,8 +234,8 @@ fn can_batch_system(reading: &HashSet<TypeId>, writing: &HashSet<TypeId>, (syste
     reading.is_disjoint(system_writes) && writing.is_disjoint(system_reads)
 }
 
-impl SystemScope {
-    fn new() -> SystemScope {
+impl<S: Send + Sync + 'static> SystemScope<S> {
+    fn new() -> SystemScope<S> {
         SystemScope {
             systems: Vec::new()
         }
@@ -204,7 +244,7 @@ impl SystemScope {
 
 macro_rules! impl_run_system {
     ($name:ident [$($read:ident),*] [$($write:ident),*]) => (
-        impl SystemScope {
+        impl<S: Send + Sync + 'static> SystemScope<S> {
             /// Queues a new system into the command buffer.
             ///
             /// Each system queued within a single `SystemScope` may be executed in parallel
@@ -213,16 +253,20 @@ macro_rules! impl_run_system {
             pub fn $name<$($read,)* $($write,)* F>(&mut self, mut f: F) -> u32
                 where $($read:Resource,)*
                       $($write:Resource,)*
-                      F: for<'a, 'b> FnMut(&'a mut EntitiesTransaction<'b>, $(&'b $read,)* $(&'b mut $write,)*) + Send + 'static
+                      F: for<'a, 'b> FnMut(&'a mut SystemContext<'b, S>, $(&'b $read,)* $(&'b mut $write,)*) + Send + 'static
             {
-                let system = move |world: &World| {
+                let system = move |world: &World, state: &S| {
                     // safety of these gets is ensured by the system scheduler
                     $(let (_, $read) = unsafe { world.get_resource::<$read>().expect("World does not contain required resource") };)*
                     $(let (_, mut $write) = unsafe { world.get_resource_mut::<$write>().expect("World does not contain required resource") };)*
 
-                    let mut tx = world.entities.transaction();
-                    f(&mut tx, $($read.deref(),)* $($write.deref_mut(),)*);
-                    tx.to_change_set()
+                    let mut context = SystemContext {
+                        entities: world.entities.transaction(),
+                        state: state
+                    };
+
+                    f(&mut context, $($read.deref(),)* $($write.deref_mut(),)*);
+                    context.to_change_set()
                 };
 
                 let mut read = HashSet::<TypeId>::new();
@@ -237,7 +281,8 @@ macro_rules! impl_run_system {
                     id: id,
                     read: read,
                     write: write,
-                    f: system
+                    f: system,
+                    phantom: PhantomData
                 });
 
                 self.systems.push(boxed);
@@ -290,44 +335,56 @@ pub enum SequentialExecute {
 }
 
 impl World {
-    /// Executes a `SystemCommandBuffer`, potentially scheduling systems for parallel execution.
-    pub fn run(&mut self, systems: &mut SystemCommandBuffer) {
+    /// Executes a `SystemCommandBuffer`, potentially scheduling systems for parallel execution, with the given state.
+    pub fn run_with_state<S: Send + Sync + 'static>(&mut self, systems: &mut SystemCommandBuffer<S>, state: &S) {
         self.execute_batched(systems, |world, batch, changes| {
             batch.par_iter_mut()
                 .weight_max()
-                .map(|system| system.execute(world))
+                .map(|system| system.execute(world, state))
                 .collect_into(changes);
         });
     }
 
-    /// Executes a `SystemCommandBuffer` sequentially.
-    pub fn run_sequential(&mut self, systems: &mut SystemCommandBuffer, mode: SequentialExecute) {
+    /// Executes a `SystemCommandBuffer`, potentially scheduling systems for parallel execution, with a default state value.
+    pub fn run<S: Send + Sync + Default + 'static>(&mut self, systems: &mut SystemCommandBuffer<S>) {
+        let state: S = Default::default();
+        self.run_with_state(systems, &state);
+    }
+
+    /// Executes a `SystemCommandBuffer` sequentially, with the given state.
+    pub fn run_with_state_sequential<S: Send + Sync + 'static>(&mut self, systems: &mut SystemCommandBuffer<S>, mode: SequentialExecute, state: &S) {
         match mode {
-            SequentialExecute::SequentialCommit => self.run_sequential_sc(systems),
-            SequentialExecute::ParallelBatchedCommit => self.run_sequential_pc(systems)
+            SequentialExecute::SequentialCommit => self.run_sequential_sc(systems, state),
+            SequentialExecute::ParallelBatchedCommit => self.run_sequential_pc(systems, state)
         };
     }
 
-    fn run_sequential_pc(&mut self, systems: &mut SystemCommandBuffer) {
+    /// Executes a `SystemCommandBuffer` sequentially, with a default state value.
+    pub fn run_sequential<S: Send + Sync + Default + 'static>(&mut self, systems: &mut SystemCommandBuffer<S>, mode: SequentialExecute) {
+        let state: S = Default::default();
+        self.run_with_state_sequential(systems, mode, &state);
+    }
+
+    fn run_sequential_pc<S: Send + Sync + 'static>(&mut self, systems: &mut SystemCommandBuffer<S>, state: &S) {
         self.execute_batched(systems, |world, batch, changes| {
             for system in batch.iter_mut() {
-                changes.push(system.execute(world));
+                changes.push(system.execute(world, state));
             }
         });
     }
 
-    fn run_sequential_sc(&mut self, systems: &mut SystemCommandBuffer) {
+    fn run_sequential_sc<S: Send + Sync + 'static>(&mut self, systems: &mut SystemCommandBuffer<S>, state: &S) {
         for batch in systems.batches.iter_mut() {
             for system in batch.iter_mut() {
-                let changes = [system.execute(self)];
+                let changes = [system.execute(self, state)];
                 self.clean_deleted_entities(&changes);
                 self.entities.merge(ArrayVec::from(changes).into_iter());
             }
         }
     }
 
-    fn execute_batched<F>(&mut self, systems: &mut SystemCommandBuffer, mut f: F)
-        where F: FnMut(&mut World, &mut Vec<Box<System>>, &mut Vec<EntityChangeSet>)
+    fn execute_batched<F, S: Send + Sync + 'static>(&mut self, systems: &mut SystemCommandBuffer<S>, mut f: F)
+        where F: FnMut(&mut World, &mut Vec<Box<System<S>>>, &mut Vec<EntityChangeSet>)
     {
         let mut changes = mem::replace(&mut self.changes_buffer, None).unwrap();
         for batch in systems.batches.iter_mut() {
@@ -422,7 +479,7 @@ mod tests {
 
         let run_count_clone = run_count.clone();
 
-        let mut buffer = SystemCommandBuffer::new();
+        let mut buffer = SystemCommandBuffer::default();
         buffer.queue_systems(|scope| {
             scope.run_r0w0(move |_| { run_count_clone.fetch_add(1, Ordering::Relaxed); });
         });
@@ -442,7 +499,7 @@ mod tests {
         let run_count_clone2 = run_count.clone();
         let run_count_clone3 = run_count.clone();
 
-        let mut buffer = SystemCommandBuffer::new();
+        let mut buffer = SystemCommandBuffer::default();
         buffer.queue_systems(|scope| {
             scope.run_r0w0(move |_| { run_count_clone1.fetch_add(1, Ordering::Relaxed); });
             scope.run_r0w0(move |_| { run_count_clone2.fetch_add(1, Ordering::Relaxed); });
@@ -460,7 +517,7 @@ mod tests {
         world.register_resource(TestResource { x: 1 });
         world.register_resource(TestResource2 {});
 
-        let mut buffer = SystemCommandBuffer::new();
+        let mut buffer = SystemCommandBuffer::default();
         buffer.queue_systems(|scope| {
             scope.run_r1w0(move |_, r: &TestResource| {
                 assert_eq!(r.x, 1);
@@ -487,7 +544,7 @@ mod tests {
             world.register_resource(TestResource { x: 1 });
             world.register_resource(TestResource2 {});
 
-            let mut buffer = SystemCommandBuffer::new();
+            let mut buffer = SystemCommandBuffer::default();
             let (a, b, c, d) = buffer.queue_systems(|scope| {
                 let a = scope.run_r1w0(move |_, r: &TestResource| {
                     assert_eq!(r.x, 1);
@@ -521,7 +578,7 @@ mod tests {
 
     #[test]
     fn system_batch_all_read_distinct() {
-        let mut buffer = SystemCommandBuffer::new();
+        let mut buffer = SystemCommandBuffer::default();
 
         buffer.queue_systems(|scope| {
             scope.run_r1w0(|_, _: &TestResource| {});
@@ -535,7 +592,7 @@ mod tests {
 
     #[test]
     fn system_batch_all_read() {
-        let mut buffer = SystemCommandBuffer::new();
+        let mut buffer = SystemCommandBuffer::default();
 
         buffer.queue_systems(|scope| {
             scope.run_r1w0(|_, _: &TestResource| {});
@@ -549,7 +606,7 @@ mod tests {
 
     #[test]
     fn system_batch_all_write_distinct() {
-        let mut buffer = SystemCommandBuffer::new();
+        let mut buffer = SystemCommandBuffer::default();
 
         buffer.queue_systems(|scope| {
             scope.run_r0w1(|_, _: &mut TestResource| {});
@@ -566,7 +623,7 @@ mod tests {
 
     #[test]
     fn system_batch_all_write() {
-        let mut buffer = SystemCommandBuffer::new();
+        let mut buffer = SystemCommandBuffer::default();
 
         buffer.queue_systems(|scope| {
             scope.run_r0w1(|_, _: &mut TestResource| {});
@@ -584,7 +641,7 @@ mod tests {
 
     #[test]
     fn system_batch_all_write_interleaved() {
-        let mut buffer = SystemCommandBuffer::new();
+        let mut buffer = SystemCommandBuffer::default();
 
         buffer.queue_systems(|scope| {
             scope.run_r0w1(|_, _: &mut TestResource| {});
@@ -603,7 +660,7 @@ mod tests {
 
     #[test]
     fn system_batch_mixed() {
-        let mut buffer = SystemCommandBuffer::new();
+        let mut buffer = SystemCommandBuffer::default();
 
         buffer.queue_systems(|scope| {
             scope.run_r1w0(|_, _: &TestResource| {});
@@ -628,7 +685,7 @@ mod tests {
 
     #[test]
     fn system_command_buffer() {
-        let mut systems = SystemCommandBuffer::new();
+        let mut systems = SystemCommandBuffer::default();
         systems.queue_systems(|scope| {
             scope.run_r1w1(|_, _: &TestResource, _: &mut TestResource2| {
 
@@ -646,11 +703,24 @@ mod tests {
     }
 
     #[test]
+    fn pass_state() {
+        let mut systems = SystemCommandBuffer::<u32>::new();
+        systems.queue_systems(|scope| {
+            scope.run_r0w0(|ctx| {
+                assert_eq!(ctx.state(), &5u32);
+            });
+        });
+
+        let mut world = World::new();
+        world.run_with_state(&mut systems, &5u32);
+    }
+
+    #[test]
     fn clean_deleted_entities() {
         let mut world = World::new();
         world.register_entity_resource(VecResource::<u32>::new());
 
-        let mut buffer = SystemCommandBuffer::new();
+        let mut buffer = SystemCommandBuffer::default();
         buffer.queue_systems(|scope| {
             scope.run_r0w1(|tx, resource: &mut VecResource<u32>| {
                 println!("Creating entities");
