@@ -155,7 +155,7 @@ mod tests {
     struct Position {
         x: f32,
         y: f32,
-        z: f32
+        z: f32,
     }
 
     type Positions = VecResource<Position>;
@@ -163,7 +163,7 @@ mod tests {
     struct Velocity {
         x: f32,
         y: f32,
-        z: f32
+        z: f32,
     }
 
     type Velocities = VecResource<Velocity>;

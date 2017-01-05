@@ -21,7 +21,7 @@ bitflags! {
 struct ResourceCell {
     cell: UnsafeCell<Box<Resource>>,
     type_id: TypeId,
-    desc: ResourceDescription
+    desc: ResourceDescription,
 }
 
 impl ResourceCell {
@@ -49,7 +49,7 @@ impl ResourceCell {
 /// Constructs and configures a world resource.
 pub struct ResourceBuilder<T: Resource> {
     resource: T,
-    desc: ResourceDescription
+    desc: ResourceDescription,
 }
 
 impl<T: Resource> ResourceBuilder<T> {
@@ -57,7 +57,7 @@ impl<T: Resource> ResourceBuilder<T> {
     pub fn new(resource: T) -> ResourceBuilder<T> {
         ResourceBuilder {
             resource: resource,
-            desc: ResourceDescription::empty()
+            desc: ResourceDescription::empty(),
         }
     }
 
@@ -65,7 +65,7 @@ impl<T: Resource> ResourceBuilder<T> {
         ResourceCell {
             cell: UnsafeCell::new(Box::new(self.resource)),
             type_id: TypeId::of::<T>(),
-            desc: self.desc
+            desc: self.desc,
         }
     }
 }
@@ -84,7 +84,7 @@ pub struct World {
     entities: Entities,
     resources: FnvHashMap<TypeId, (u8, ResourceCell)>,
     entity_resources: Vec<TypeId>,
-    changes_buffer: Option<Vec<EntityChangeSet>>
+    changes_buffer: Option<Vec<EntityChangeSet>>,
 }
 
 // resource access is ensured safe by the system scheduler
@@ -97,7 +97,7 @@ impl World {
             entities: Entities::new(),
             resources: FnvHashMap::default(),
             entity_resources: Vec::new(),
-            changes_buffer: Some(Vec::new())
+            changes_buffer: Some(Vec::new()),
         }
     }
 
@@ -154,7 +154,7 @@ impl World {
     }
 }
 
-trait System<S: Send + Sync + 'static> : Send {
+trait System<S: Send + Sync + 'static>: Send {
     fn id(&self) -> u32;
     fn resource_access(&self) -> (&HashSet<TypeId>, &HashSet<TypeId>);
     fn execute(&mut self, &World, &S) -> EntityChangeSet;
@@ -163,7 +163,7 @@ trait System<S: Send + Sync + 'static> : Send {
 /// Contains system execution state information.
 pub struct SystemContext<'a, S: Send + Sync + 'static> {
     entities: EntitiesTransaction<'a>,
-    state: &'a S
+    state: &'a S,
 }
 
 impl<'a, S: Send + Sync + 'static> Deref for SystemContext<'a, S> {
@@ -191,12 +191,15 @@ impl<'a, S: Send + Sync + 'static> SystemContext<'a, S> {
     }
 }
 
-struct FnSystem<S, F> where F: FnMut(&World, &S) -> EntityChangeSet + Send, S: Send + Sync + 'static {
+struct FnSystem<S, F>
+    where F: FnMut(&World, &S) -> EntityChangeSet + Send,
+          S: Send + Sync + 'static
+{
     id: u32,
     read: HashSet<TypeId>,
     write: HashSet<TypeId>,
     f: F,
-    phantom: PhantomData<&'static S>
+    phantom: PhantomData<&'static S>,
 }
 
 impl<S: Send + Sync + 'static, T: FnMut(&World, &S) -> EntityChangeSet + Send> System<S> for FnSystem<S, T> {
@@ -218,12 +221,12 @@ impl<S: Send + Sync + 'static, T: FnMut(&World, &S) -> EntityChangeSet + Send> S
 
 /// Records system executions, to be run later within a `World`.
 pub struct SystemCommandBuffer<S: Send + Sync + 'static = ()> {
-    batches: Vec<Vec<Box<System<S>>>>
+    batches: Vec<Vec<Box<System<S>>>>,
 }
 
 /// Systems queued within a `SystemScope` may be scheduled to run in parallel.
 pub struct SystemScope<S: Send + Sync + 'static> {
-    systems: Vec<Box<System<S>>>
+    systems: Vec<Box<System<S>>>,
 }
 
 impl SystemCommandBuffer<()> {
@@ -236,9 +239,7 @@ impl SystemCommandBuffer<()> {
 impl<S: Send + Sync + 'static> SystemCommandBuffer<S> {
     /// Constructs a new `SystemCommandBuffer`.
     pub fn new() -> SystemCommandBuffer<S> {
-        SystemCommandBuffer {
-            batches: Vec::new()
-        }
+        SystemCommandBuffer { batches: Vec::new() }
     }
 
     /// Queues a sequence of systems into the command buffer. Each system may be run concurrently.
@@ -283,9 +284,7 @@ fn can_batch_system(reading: &HashSet<TypeId>, writing: &HashSet<TypeId>, (syste
 
 impl<S: Send + Sync + 'static> SystemScope<S> {
     fn new() -> SystemScope<S> {
-        SystemScope {
-            systems: Vec::new()
-        }
+        SystemScope { systems: Vec::new() }
     }
 }
 
@@ -304,8 +303,12 @@ macro_rules! impl_run_system {
             {
                 let system = move |world: &World, state: &S| {
                     // safety of these gets is ensured by the system scheduler
-                    $(let (_, $read) = unsafe { world.get_resource::<$read>().expect("World does not contain required resource") };)*
-                    $(let (_, mut $write) = unsafe { world.get_resource_mut::<$write>().expect("World does not contain required resource") };)*
+                    $(let (_, $read) = unsafe {
+                        world.get_resource::<$read>().expect("World does not contain required resource")
+                    };)*
+                    $(let (_, mut $write) = unsafe {
+                        world.get_resource_mut::<$write>().expect("World does not contain required resource")
+                    };)*
 
                     let mut context = SystemContext {
                         entities: world.entities.transaction(),
@@ -378,7 +381,7 @@ pub enum SequentialExecute {
     /// Entity creations and delections are always comitted in the same batches that would
     /// otherwise had been scheduled for parallel execution had the command buffer been executed
     /// in parallel. This emulates the same behavior as parallel command buffer execution.
-    ParallelBatchedCommit
+    ParallelBatchedCommit,
 }
 
 impl World {
@@ -402,7 +405,7 @@ impl World {
     pub fn run_with_state_sequential<S: Send + Sync + 'static>(&mut self, systems: &mut SystemCommandBuffer<S>, mode: SequentialExecute, state: &S) {
         match mode {
             SequentialExecute::SequentialCommit => self.run_sequential_sc(systems, state),
-            SequentialExecute::ParallelBatchedCommit => self.run_sequential_pc(systems, state)
+            SequentialExecute::ParallelBatchedCommit => self.run_sequential_pc(systems, state),
         };
     }
 
@@ -431,7 +434,9 @@ impl World {
     }
 
     fn execute_batched<F, S: Send + Sync + 'static>(&mut self, systems: &mut SystemCommandBuffer<S>, mut f: F)
-        where F: FnMut(&mut World, &mut Vec<Box<System<S>>>, &mut Vec<EntityChangeSet>)
+        where F: FnMut(&mut World,
+                       &mut Vec<Box<System<S>>>,
+                       &mut Vec<EntityChangeSet>)
     {
         let mut changes = mem::replace(&mut self.changes_buffer, None).unwrap();
         for batch in systems.batches.iter_mut() {
@@ -460,15 +465,15 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct TestResource {
-        pub x: u8
+        pub x: u8,
     }
 
     struct TestResource2 { }
     struct TestResource3 { }
 
-    impl Resource for TestResource { }
-    impl Resource for TestResource2 { }
-    impl Resource for TestResource3 { }
+    impl Resource for TestResource {}
+    impl Resource for TestResource2 {}
+    impl Resource for TestResource3 {}
 
     #[test]
     fn create_world() {
@@ -528,7 +533,9 @@ mod tests {
 
         let mut buffer = SystemCommandBuffer::default();
         buffer.queue_systems(|scope| {
-            scope.run_r0w0(move |_| { run_count_clone.fetch_add(1, Ordering::Relaxed); });
+            scope.run_r0w0(move |_| {
+                run_count_clone.fetch_add(1, Ordering::Relaxed);
+            });
         });
 
         world.run(&mut buffer);
@@ -548,9 +555,15 @@ mod tests {
 
         let mut buffer = SystemCommandBuffer::default();
         buffer.queue_systems(|scope| {
-            scope.run_r0w0(move |_| { run_count_clone1.fetch_add(1, Ordering::Relaxed); });
-            scope.run_r0w0(move |_| { run_count_clone2.fetch_add(1, Ordering::Relaxed); });
-            scope.run_r0w0(move |_| { run_count_clone3.fetch_add(1, Ordering::Relaxed); });
+            scope.run_r0w0(move |_| {
+                run_count_clone1.fetch_add(1, Ordering::Relaxed);
+            });
+            scope.run_r0w0(move |_| {
+                run_count_clone2.fetch_add(1, Ordering::Relaxed);
+            });
+            scope.run_r0w0(move |_| {
+                run_count_clone3.fetch_add(1, Ordering::Relaxed);
+            });
         });
 
         world.run(&mut buffer);

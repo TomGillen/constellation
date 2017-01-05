@@ -9,7 +9,7 @@ pub type Index = u32;
 pub type Generation = u8;
 
 /// A handle is formed out of an Index and a Generation
-pub trait Handle<TIndex, TGeneration> : Clone + Copy + fmt::Display {
+pub trait Handle<TIndex, TGeneration>: Clone + Copy + fmt::Display {
     /// Constructs a new handle.
     fn new(index: TIndex, generation: TGeneration) -> Self;
 
@@ -57,7 +57,7 @@ pub struct Entities {
     allocated: AtomicUsize,
     generations: Vec<Generation>,
     free: SegQueue<Index>,
-    deleted_pool: SegQueue<Vec<Entity>>
+    deleted_pool: SegQueue<Vec<Entity>>,
 }
 
 impl Entities {
@@ -68,7 +68,7 @@ impl Entities {
             free: SegQueue::new(),
             free_count_approx: AtomicUsize::new(0),
             allocated: AtomicUsize::new(0),
-            deleted_pool: SegQueue::new()
+            deleted_pool: SegQueue::new(),
         }
     }
 
@@ -92,7 +92,7 @@ impl Entities {
         let index = entity.index() as usize;
         match self.generations.get(index) {
             Some(&g) => g == entity.generation(),
-            None     => self.allocated.load(Ordering::Relaxed) > index
+            None => self.allocated.load(Ordering::Relaxed) > index,
         }
     }
 
@@ -105,7 +105,7 @@ impl Entities {
     pub fn by_index(&self, index: Index) -> Entity {
         match self.generations.get(index as usize) {
             Some(&g) => Entity::new(index, g),
-            None     => Entity::new(index, 0)
+            None => Entity::new(index, 0),
         }
     }
 
@@ -117,13 +117,13 @@ impl Entities {
             entities: self,
             deleted: match self.deleted_pool.try_pop() {
                 Some(vec) => vec,
-                None      => Vec::new()
-            }
+                None => Vec::new(),
+            },
         }
     }
 
     /// Merges a set of entity transactions, comitting their allocations and delections.
-    pub fn merge<T: Iterator<Item=EntityChangeSet>>(&mut self, changes: T) {
+    pub fn merge<T: Iterator<Item = EntityChangeSet>>(&mut self, changes: T) {
         self.commit_allocations();
 
         let mut freed = 0;
@@ -154,13 +154,13 @@ impl Entities {
 /// An entity transaction allows concurrent creations and deletions of entities from an `Entities`.
 pub struct EntitiesTransaction<'a> {
     entities: &'a Entities,
-    deleted: Vec<Entity>
+    deleted: Vec<Entity>,
 }
 
 /// Summarises the final changes made during the lifetime of an entity transaction.
 pub struct EntityChangeSet {
     /// The entities deleted in the transaction.
-    pub deleted: Vec<Entity>
+    pub deleted: Vec<Entity>,
 }
 
 impl<'a> EntitiesTransaction<'a> {
@@ -193,9 +193,7 @@ impl<'a> EntitiesTransaction<'a> {
 
     /// Converts this transaction into a change set, consuming the transaction in the process.
     pub fn to_change_set(self) -> EntityChangeSet {
-        EntityChangeSet {
-            deleted: self.deleted
-        }
+        EntityChangeSet { deleted: self.deleted }
     }
 }
 
