@@ -109,20 +109,18 @@ impl Entities {
         }
     }
 
-    /// Creates a new entity transaction. Transactions can be used to allocate or delete
-    /// entities in multiple threads concurrently. Entity deletions are comitted with the
-    /// transaction is merged via `merge`.
+    /// Creates a new entity transaction. Transactions can be used to allocate
+    /// or delete entities in multiple threads concurrently. Entity deletions
+    /// are comitted with the transaction is merged via `merge`.
     pub fn transaction(&self) -> EntitiesTransaction {
         EntitiesTransaction {
             entities: self,
-            deleted: match self.deleted_pool.try_pop() {
-                Some(vec) => vec,
-                None => Vec::new(),
-            },
+            deleted: self.deleted_pool.try_pop().unwrap_or(Vec::new()),
         }
     }
 
-    /// Merges a set of entity transactions, comitting their allocations and delections.
+    /// Merges a set of entity transactions, comitting their allocations and
+    /// delections.
     pub fn merge<T: Iterator<Item = EntityChangeSet>>(&mut self, changes: T) {
         self.commit_allocations();
 
@@ -151,13 +149,15 @@ impl Entities {
     }
 }
 
-/// An entity transaction allows concurrent creations and deletions of entities from an `Entities`.
+/// An entity transaction allows concurrent creations and deletions of entities
+/// from an `Entities`.
 pub struct EntitiesTransaction<'a> {
     entities: &'a Entities,
     deleted: Vec<Entity>,
 }
 
-/// Summarises the final changes made during the lifetime of an entity transaction.
+/// Summarises the final changes made during the lifetime of an
+/// entity transaction.
 pub struct EntityChangeSet {
     /// The entities deleted in the transaction.
     pub deleted: Vec<Entity>,
@@ -175,8 +175,9 @@ impl<'a> EntitiesTransaction<'a> {
 
     /// Destroys an `Entity`.
     ///
-    /// Entity destructions are deferred until after the system has completed execution.
-    /// All related data stored in entity resources will also be removed at this time.
+    /// Entity destructions are deferred until after the system has completed
+    /// execution. All related data stored in entity resources will also be
+    /// removed at this time.
     pub fn destroy(&mut self, entity: Entity) {
         self.deleted.push(entity);
     }
@@ -191,44 +192,45 @@ impl<'a> EntitiesTransaction<'a> {
         self.entities.by_index(index)
     }
 
-    /// Converts this transaction into a change set, consuming the transaction in the process.
+    /// Converts this transaction into a change set,
+    /// consuming the transaction in the process.
     pub fn to_change_set(self) -> EntityChangeSet {
         EntityChangeSet { deleted: self.deleted }
     }
 }
 
 #[cfg(test)]
-mod tests {
+mod entities_tests {
     use super::*;
     use std::collections::HashSet;
 
     #[test]
-    fn entity_deconstruct() {
+    fn deconstruct_entity() {
         let entity = Entity::new(5, 10);
         assert!(entity.index() == 5);
         assert!(entity.generation() == 10);
     }
 
     #[test]
-    fn entities_new() {
+    fn new() {
         Entities::new();
     }
 
     #[test]
-    fn entities_allocate() {
+    fn allocate() {
         let em = Entities::new();
         em.allocate();
     }
 
     #[test]
-    fn entities_allocated_entity_is_alive() {
+    fn allocated_entity_is_alive() {
         let em = Entities::new();
         let entity = em.allocate();
         assert!(em.is_alive(&entity));
     }
 
     #[test]
-    fn entities_allocate_many_no_duplicates() {
+    fn allocate_many_no_duplicates() {
         let em = Entities::new();
         let mut entities: HashSet<Entity> = HashSet::new();
 
@@ -241,7 +243,7 @@ mod tests {
     }
 
     #[test]
-    fn entities_allocate_many_no_duplicates_comitted() {
+    fn allocate_many_no_duplicates_comitted() {
         let mut em = Entities::new();
         let mut entities: HashSet<Entity> = HashSet::new();
 
@@ -261,15 +263,21 @@ mod tests {
             entities.insert(e);
         }
     }
+}
+
+#[cfg(test)]
+mod entities_transaction_tests {
+    use super::*;
+    use std::collections::HashSet;
 
     #[test]
-    fn entitiestx_new() {
+    fn new() {
         let em = Entities::new();
         em.transaction();
     }
 
     #[test]
-    fn entitiestx_create() {
+    fn create() {
         let em = Entities::new();
         let mut tx = em.transaction();
 
@@ -277,7 +285,7 @@ mod tests {
     }
 
     #[test]
-    fn entitiestx_created_is_alive() {
+    fn created_is_alive() {
         let em = Entities::new();
         let mut tx = em.transaction();
 
@@ -286,7 +294,7 @@ mod tests {
     }
 
     #[test]
-    fn entitiestx_merge_allocates() {
+    fn merge_allocates() {
         let mut em = Entities::new();
 
         let entity: Entity;
@@ -304,7 +312,7 @@ mod tests {
     }
 
     #[test]
-    fn entitiestx_merge_deletes() {
+    fn merge_deletes() {
         let mut em = Entities::new();
         let mut entities: HashSet<Entity> = HashSet::new();
 

@@ -242,7 +242,8 @@ impl<S: Send + Sync + 'static> SystemCommandBuffer<S> {
         SystemCommandBuffer { batches: Vec::new() }
     }
 
-    /// Queues a sequence of systems into the command buffer. Each system may be run concurrently.
+    /// Queues a sequence of systems into the command buffer.
+    /// Each system may potentially be run concurrently.
     pub fn queue_systems<'a, F, R>(&mut self, f: F) -> R
         where F: FnOnce(&mut SystemScope<S>) -> R + 'a
     {
@@ -293,8 +294,9 @@ macro_rules! impl_run_system {
         impl<S: Send + Sync + 'static> SystemScope<S> {
             /// Queues a new system into the command buffer.
             ///
-            /// Each system queued within a single `SystemScope` may be executed in parallel
-            /// with each other. See crate documentation for more information.
+            /// Each system queued within a single `SystemScope` may be executed
+            /// in parallel with each other. See crate documentation for more
+            /// information.
             #[allow(non_snake_case, unused_variables, unused_mut)]
             pub fn $name<$($read,)* $($write,)* F>(&mut self, mut f: F) -> u32
                 where $($read:Resource,)*
@@ -375,12 +377,17 @@ impl_run_system!(run_r6w3 [R0, R1, R2, R3, R4, R5] [W0, W1, W2]);
 /// system command buffer sequentially.
 pub enum SequentialExecute {
     /// Entity creations and delections are always comitted after each system,
-    /// guarenteeing that delections will always be observed by later queued systems.
-    /// This does not always result in the same behavior as parallel command buffer execution.
+    /// guarenteeing that delections will always be observed by later queued
+    /// systems.
+    ///
+    /// This does not always result in the same behavior as parallel command
+    /// buffer execution.
     SequentialCommit,
-    /// Entity creations and delections are always comitted in the same batches that would
-    /// otherwise had been scheduled for parallel execution had the command buffer been executed
-    /// in parallel. This emulates the same behavior as parallel command buffer execution.
+    /// Entity creations and delections are always comitted in the same batches
+    /// that would otherwise had been scheduled for parallel execution had the
+    /// command buffer been executed in parallel.
+    ///
+    /// This emulates the same behavior as parallel command buffer execution.
     ParallelBatchedCommit,
 }
 

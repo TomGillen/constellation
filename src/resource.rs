@@ -51,10 +51,12 @@ pub trait EntityResource: Resource {
     // fn deconstruct(&self) -> (&Self::Filter, &Self::Api);
     // fn deconstruct_mut(&mut self) -> (&Self::Filter, &mut Self::Api);
 
-    /// Splits the entity resource into a bitset used for entity iteration, and its restricted API.
+    /// Splits the entity resource into a bitset used for entity iteration,
+    /// and its restricted API.
     fn deconstruct(&self) -> (&BitSet, &Self::Api);
 
-    /// Splits the entity resource into a bitset used for entity iteration, and its restricted API.
+    /// Splits the entity resource into a bitset used for entity iteration,
+    /// and its restricted API.
     fn deconstruct_mut(&mut self) -> (&BitSet, &mut Self::Api);
 }
 
@@ -63,10 +65,11 @@ macro_rules! impl_iter_entities {
         /// Constructs an iterator which yields the index of each entity with
         /// data stored in all given entity resources.
         ///
-        /// This function borrows each resource, preventing mutation of the resource for the
-        /// duration of its' scope. However, the user is provided with restricted APIs for each
-        /// resource which may allow mutable access to entity data stored within the resource,
-        /// without allowing any operations which would invalidate the entity iterator.
+        /// This function borrows each resource, preventing mutation of the
+        /// resource for the duration of its' scope. However, the user is
+        /// provided with restricted APIs for each resource which may allow
+        /// mutable access to entity data stored within the resource, without
+        /// allowing any operations which would invalidate the entity iterator.
         #[allow(non_snake_case)]
         pub fn $name<'a, $($read,)* $($write,)* F, R>($($read: &$read,)* $($write: &mut $write,)* f: F) -> R
             where $($read:EntityResource,)*
