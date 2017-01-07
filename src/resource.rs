@@ -8,7 +8,6 @@ use fnv::FnvHashMap;
 
 use entities::*;
 use bitset::*;
-use join::*;
 use world::*;
 
 /// A resource whos system access is controlled by the `World`.
@@ -59,68 +58,6 @@ pub trait EntityResource: Resource {
     /// and its restricted API.
     fn deconstruct_mut(&mut self) -> (&BitSet, &mut Self::Api);
 }
-
-macro_rules! impl_iter_entities {
-    ($name:ident [$($read:ident),*] [$($write:ident),*] [$iter:ty]) => (
-        /// Constructs an iterator which yields the index of each entity with
-        /// data stored in all given entity resources.
-        ///
-        /// This function borrows each resource, preventing mutation of the
-        /// resource for the duration of its' scope. However, the user is
-        /// provided with restricted APIs for each resource which may allow
-        /// mutable access to entity data stored within the resource, without
-        /// allowing any operations which would invalidate the entity iterator.
-        #[allow(non_snake_case)]
-        pub fn $name<'a, $($read,)* $($write,)* F, R>($($read: &$read,)* $($write: &mut $write,)* f: F) -> R
-            where $($read:EntityResource,)*
-                  $($write:EntityResource,)*
-                  F: FnOnce($iter, $(&$read::Api,)* $(&mut $write::Api,)*) -> R + 'a
-        {
-            $(let $read = $read.deconstruct();)*
-            $(let $write = $write.deconstruct_mut();)*
-            let iter = ($($read.0,)* $($write.0,)*).and().iter();
-
-            f(iter, $($read.1,)* $($write.1,)*)
-        }
-    )
-}
-
-impl_iter_entities!(iter_entities_r0w1 [] [W0] [BitIter<&BitSet>]);
-impl_iter_entities!(iter_entities_r0w2 [] [W0, W1] [BitIter<BitSetAnd<&BitSet, &BitSet>>]);
-impl_iter_entities!(iter_entities_r0w3 [] [W0, W1, W2] [BitIter<BitSetAnd<&BitSet, BitSetAnd<&BitSet, &BitSet>>>]);
-impl_iter_entities!(iter_entities_r1w0 [R0] [] [BitIter<&BitSet>]);
-impl_iter_entities!(iter_entities_r1w1 [R0] [W0] [BitIter<BitSetAnd<&BitSet, &BitSet>>]);
-impl_iter_entities!(iter_entities_r1w2 [R0] [W0, W1] [BitIter<BitSetAnd<&BitSet, BitSetAnd<&BitSet, &BitSet>>>]);
-impl_iter_entities!(iter_entities_r1w3 [R0] [W0, W1, W3] [BitIter<BitSetAnd<BitSetAnd<&BitSet, &BitSet>, BitSetAnd<&BitSet, &BitSet>>>]);
-impl_iter_entities!(iter_entities_r2w0 [R0, R1] [] [BitIter<BitSetAnd<&BitSet, &BitSet>>]);
-impl_iter_entities!(iter_entities_r2w1 [R0, R1] [W0] [BitIter<BitSetAnd<&BitSet, BitSetAnd<&BitSet, &BitSet>>>]);
-impl_iter_entities!(iter_entities_r2w2 [R0, R1] [W0, W1] [BitIter<BitSetAnd<BitSetAnd<&BitSet, &BitSet>, BitSetAnd<&BitSet, &BitSet>>>]);
-impl_iter_entities!(iter_entities_r2w3 [R0, R1] [W0, W1, W3] [BitIter<BitSetAnd<BitSetAnd<&BitSet, &BitSet>, BitSetAnd<&BitSet, BitSetAnd<&BitSet, &BitSet>>>>]);
-impl_iter_entities!(iter_entities_r3w0 [R0, R1, R2] [] [BitIter<BitSetAnd<&BitSet, BitSetAnd<&BitSet, &BitSet>>>]);
-impl_iter_entities!(iter_entities_r3w1 [R0, R1, R2] [W1] [BitIter<BitSetAnd<BitSetAnd<&BitSet, &BitSet>, BitSetAnd<&BitSet, &BitSet>>>]);
-impl_iter_entities!(iter_entities_r3w2 [R0, R1, R2] [W1, W2] [BitIter<BitSetAnd<BitSetAnd<&BitSet, &BitSet>, BitSetAnd<&BitSet, BitSetAnd<&BitSet, &BitSet>>>>]);
-impl_iter_entities!(iter_entities_r3w3 [R0, R1, R2] [W1, W2, W3] [BitIter<BitSetAnd<BitSetAnd<&BitSet, BitSetAnd<&BitSet, &BitSet>>, BitSetAnd<&BitSet, BitSetAnd<&BitSet, &BitSet>>>>]);
-impl_iter_entities!(iter_entities_r4w0 [R0, R1, R2, R3] [] [BitIter<BitSetAnd<BitSetAnd<&BitSet, &BitSet>, BitSetAnd<&BitSet, &BitSet>>>]);
-impl_iter_entities!(iter_entities_r4w1 [R0, R1, R2, R3] [W1] [BitIter<BitSetAnd<BitSetAnd<&BitSet, &BitSet>, BitSetAnd<&BitSet, BitSetAnd<&BitSet, &BitSet>>>>]);
-impl_iter_entities!(iter_entities_r4w2 [R0, R1, R2, R3] [W1, W2] [BitIter<BitSetAnd<BitSetAnd<&BitSet, BitSetAnd<&BitSet, &BitSet>>, BitSetAnd<&BitSet, BitSetAnd<&BitSet, &BitSet>>>>]);
-impl_iter_entities!(iter_entities_r4w3 [R0, R1, R2, R3] [W1, W2, W3] [BitIter<BitSetAnd<BitSetAnd<&BitSet, BitSetAnd<&BitSet, &BitSet>>, BitSetAnd<BitSetAnd<&BitSet, &BitSet>, BitSetAnd<&BitSet, &BitSet>>>>]);
-
-// todo: find out why the compiler gets confused when using associated types in
-// the FnOnce with iter_entities for the iterator and BitSet.
-// Solving this would eliminate the need to provide the iterator type in the
-// macro invokations, and allow EntityResources to specify alternate BitSetLike
-// filters via associated types.
-
-// pub fn iter_entities_r1w1<'a, R1, W1, F>(r1: &R1, w1: &mut W1, f: F)
-//     where R1: EntityResource,
-//           W1: EntityResource,
-//           F: FnOnce(BitIter<<(&R1::Filter, &W1::Filter) as BitAnd>::Value>, &R1::Api, &mut W1::Api) + 'a
-// {
-//     let (r1_filter, r1_api) = r1.deconstruct();
-//     let (w1_filter, w1_api) = w1.deconstruct_mut();
-//     let iter = (r1_filter, w1_filter).and().iter();
-//     f(iter, r1_api, w1_api);
-// }
 
 /// A `MapResource` stores per-entity data in a `HashMap`.
 ///
@@ -291,7 +228,8 @@ impl<T: Any + Send + Sync> VecResource<T> {
         }
 
         if self.storage.g[index] != None {
-            panic!("VecResource already contains entity data for index {}", index);
+            panic!("VecResource already contains entity data for index {}",
+                   index);
         }
 
         // copy the component into the array without reading/dropping
@@ -490,6 +428,7 @@ impl<'a, T> Iterator for VecStorageIterMut<'a, T> {
 mod tests {
     use super::*;
     use entities::*;
+    use world::*;
 
     #[test]
     fn map_deconstruct() {
@@ -555,28 +494,54 @@ mod tests {
 
     #[test]
     fn run_iter_entities_r1w1() {
-        let a = Entity::new(1, 0);
-        let b = Entity::new(2, 0);
-        let c = Entity::new(4, 0);
+        let mut world = World::new();
+        world.register_resource(VecResource::<u32>::new());
+        world.register_resource(MapResource::<u32>::new());
+        world.register_resource(VecResource::<u64>::new());
 
-        let vec = &mut VecResource::<u32>::new();
-        vec.add(a, 1);
-        vec.add(b, 2);
-        vec.add(c, 3);
+        let mut test = SystemCommandBuffer::default();
+        test.queue_systems(|scope| {
+            scope.run_r0w3(|ctx, v: &mut VecResource<u32>, m: &mut MapResource<u32>, r: &mut VecResource<u64>| {
+                let a = ctx.create();
+                let b = ctx.create();
+                let c = ctx.create();
 
-        let map = &mut MapResource::<u32>::new();
-        map.add(a, 1);
-        map.add(c, 4);
+                v.add(a, 1);
+                v.add(b, 2);
+                v.add(c, 3);
 
-        iter_entities_r1w1(map, vec, |iter, m, v| {
-            for e in iter {
-                let x = unsafe { v.get_unchecked_mut(e) };
-                *x += *m.get(Entity::new(e, 0)).unwrap();
-            }
+                m.add(a, 1);
+                m.add(c, 4);
+
+                r.add(a, 0);
+                r.add(b, 0);
+                r.add(c, 0);
+            });
+
+            scope.run_r2w1(|ctx, map: &MapResource<u32>, vec: &VecResource<u32>, out: &mut VecResource<u64>| {
+                ctx.iter().r2w1(map, vec, out, |iter, m, v, o| {
+                    for e in iter {
+                        let x = unsafe { o.get_unchecked_mut(e.index()) };
+                        *x = (*v.get(e).unwrap() + *m.get(e).unwrap()) as u64;
+                    }
+                });
+            });
+
+            scope.run_r3w0(|ctx, map: &MapResource<u32>, vec: &VecResource<u32>, out: &VecResource<u64>| {
+                let mut checked = 0;
+
+                ctx.iter().r3w0(map, vec, out, |iter, m, v, o| {
+                    for e in iter {
+                        assert_eq!(*o.get(e).unwrap(),
+                                   (m.get(e).unwrap() + v.get(e).unwrap()) as u64);
+                        checked = checked + 1;
+                    }
+                });
+
+                assert_eq!(checked, 2);
+            });
         });
 
-        assert_eq!(vec.get(a), Some(&2u32));
-        assert_eq!(vec.get(b), Some(&2u32));
-        assert_eq!(vec.get(c), Some(&7u32));
+        world.run_sequential(&mut test, SequentialExecute::SequentialCommit);
     }
 }

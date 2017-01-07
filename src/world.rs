@@ -162,7 +162,8 @@ trait System<S: Send + Sync + 'static>: Send {
 
 /// Contains system execution state information.
 pub struct SystemContext<'a, S: Send + Sync + 'static> {
-    entities: EntitiesTransaction<'a>,
+    entities: &'a Entities,
+    transaction: EntitiesTransaction<'a>,
     state: &'a S,
 }
 
@@ -170,13 +171,13 @@ impl<'a, S: Send + Sync + 'static> Deref for SystemContext<'a, S> {
     type Target = EntitiesTransaction<'a>;
 
     fn deref(&self) -> &EntitiesTransaction<'a> {
-        &self.entities
+        &self.transaction
     }
 }
 
 impl<'a, S: Send + Sync + 'static> DerefMut for SystemContext<'a, S> {
     fn deref_mut(&mut self) -> &mut EntitiesTransaction<'a> {
-        &mut self.entities
+        &mut self.transaction
     }
 }
 
@@ -186,8 +187,13 @@ impl<'a, S: Send + Sync + 'static> SystemContext<'a, S> {
         self.state
     }
 
+    /// Gets the entity iterator.
+    pub fn iter(&self) -> EntityIterBuilder<'a> {
+        EntityIterBuilder::new(self.entities)
+    }
+
     fn to_change_set(self) -> EntityChangeSet {
-        self.entities.to_change_set()
+        self.transaction.to_change_set()
     }
 }
 
@@ -313,7 +319,8 @@ macro_rules! impl_run_system {
                     };)*
 
                     let mut context = SystemContext {
-                        entities: world.entities.transaction(),
+                        entities: &world.entities,
+                        transaction: world.entities.transaction(),
                         state: state
                     };
 
@@ -798,36 +805,35 @@ mod tests {
                 println!("Entities created");
             });
 
-            scope.run_r1w0(|entities, resource: &VecResource<u32>| {
+            scope.run_r1w0(|ctx, resource: &VecResource<u32>| {
                 println!("Verifying entity creation");
-                iter_entities_r1w0(resource, |iter, r| {
-                    for i in iter {
-                        assert_eq!(i, *r.get(entities.by_index(i)).unwrap());
+                ctx.iter().r1w0(resource, |iter, r| {
+                    for e in iter {
+                        assert_eq!(e.index(), *r.get(e).unwrap());
                     }
                 });
                 println!("Verified entity creation");
             });
 
-            scope.run_r0w1(|tx, resource: &mut VecResource<u32>| {
+            scope.run_r0w1(|ctx, resource: &mut VecResource<u32>| {
                 println!("Deleting entities");
-                let mut entities = Vec::<Index>::new();
-                iter_entities_r1w0(resource, |iter, _| {
-                    for i in iter {
-                        entities.push(i);
+                let mut entities = Vec::<Entity>::new();
+                ctx.iter().r1w0(resource, |iter, _| {
+                    for e in iter {
+                        entities.push(e);
                     }
                 });
 
                 for e in entities {
-                    let entity = tx.by_index(e);
-                    tx.destroy(entity);
+                    ctx.destroy(e);
                 }
                 println!("Deleted entities");
             });
 
-            scope.run_r1w0(|_, resource: &VecResource<u32>| {
+            scope.run_r1w0(|ctx, resource: &VecResource<u32>| {
                 println!("Verifying entity deletion");
-                let mut entities = Vec::<Index>::new();
-                iter_entities_r1w0(resource, |iter, _| {
+                let mut entities = Vec::<Entity>::new();
+                ctx.iter().r1w0(resource, |iter, _| {
                     for e in iter {
                         entities.push(e);
                     }
