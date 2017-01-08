@@ -83,8 +83,8 @@
 //!             // - which would otherwise invalidate the iterator
 //!             for e in entity_iter {
 //!                 // unchecked getters offer direct indexing
-//!                 let position = unsafe { p.get_unchecked_mut(e.index()) };
-//!                 let velocity = unsafe { v.get_unchecked(e.index()) };
+//!                 let position = unsafe { p.get_unchecked_mut(e) };
+//!                 let velocity = unsafe { v.get_unchecked(e) };
 //!                 position.x += velocity.x;
 //!                 position.y += velocity.y;
 //!                 position.z += velocity.z;
@@ -192,16 +192,12 @@ mod tests {
             scope.run_r1w1(|ctx, velocities: &Velocities, positions: &mut Positions| {
                 println!("Updating positions");
 
-                ctx.iter().r1w1(velocities, positions, |iter, v, p| {
-                    for e in iter {
-                        let position = unsafe { p.get_unchecked_mut(e.index()) };
-                        let velocity = unsafe { v.get_unchecked(e.index()) };
-                        position.x += velocity.x;
-                        position.y += velocity.y;
-                        position.z += velocity.z;
+                ctx.iter().components_r1w1(velocities, positions, |e, v, p| {
+                    p.x += v.x;
+                    p.y += v.y;
+                    p.z += v.z;
 
-                        ctx.destroy(e);
-                    }
+                    ctx.destroy(e);
                 });
             });
         });

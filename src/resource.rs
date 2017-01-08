@@ -59,6 +59,41 @@ pub trait EntityResource: Resource {
     fn deconstruct_mut(&mut self) -> (&BitSet, &mut Self::Api);
 }
 
+/// A component resource is a resource which stores data related to entities
+/// in the form of a single `Self::Component` per entity.
+pub trait ComponentResourceApi {
+    /// The type of data stored for each entity.
+    type Component;
+
+    /// Gets a shared reference to the component associated with the given
+    /// entity, if present.
+    fn get(&self, Entity) -> Option<&Self::Component>;
+
+    /// Gets a mutable reference to the component associated with the given
+    /// entity, if present.
+    fn get_mut(&mut self, Entity) -> Option<&mut Self::Component>;
+
+    /// Gets a shared reference to the component associated with the given
+    /// entity without performing any bounds or liveness checking.
+    ///
+    /// # Safety
+    ///
+    /// This function performs no bounds checking. Requesting data for an entity
+    /// that does not represent a living entity with data in this resource
+    /// will return an undefined result.
+    unsafe fn get_unchecked(&self, entity: Entity) -> &Self::Component;
+
+    /// Gets a mutable reference to the component associated with the given
+    /// entity without performing any bounds or liveness checking.
+    ///
+    /// # Safety
+    ///
+    /// This function performs no bounds checking. Requesting data for an entity
+    /// that does not represent a living entity with data in this resource
+    /// will return an undefined result.
+    unsafe fn get_unchecked_mut(&mut self, entity: Entity) -> &mut Self::Component;
+}
+
 /// A `MapResource` stores per-entity data in a `HashMap`.
 ///
 /// This entity resource is suitable for data which is only present for a small
@@ -143,23 +178,13 @@ impl<T> MapStorage<T> {
         MapStorage { m: FnvHashMap::default() }
     }
 
-    /// Gets an immutable reference to entity data.
-    pub fn get(&self, entity: Entity) -> Option<&T> {
-        self.m.get(&entity)
-    }
-
-    /// Gets a mutable reference to entity data.
-    pub fn get_mut(&mut self, entity: Entity) -> Option<&mut T> {
-        self.m.get_mut(&entity)
-    }
-
     /// Gets an iterator over all entity data stored in the resource.
-    pub fn components(&self) -> Values<Entity, T> {
+    pub fn iter_components(&self) -> Values<Entity, T> {
         self.m.values()
     }
 
     /// Gets an iterator over all entity data stored in the resource.
-    pub fn components_mut(&mut self) -> ValuesMut<Entity, T> {
+    pub fn iter_components_mut(&mut self) -> ValuesMut<Entity, T> {
         self.m.values_mut()
     }
 
@@ -171,6 +196,28 @@ impl<T> MapStorage<T> {
     /// Gets an iterator over all entity data stored in the resource.
     pub fn iter_mut(&mut self) -> hash_map::IterMut<Entity, T> {
         self.m.iter_mut()
+    }
+}
+
+impl<T> ComponentResourceApi for MapStorage<T> {
+    type Component = T;
+
+    fn get(&self, entity: Entity) -> Option<&T> {
+        self.m.get(&entity)
+    }
+
+    #[inline]
+    unsafe fn get_unchecked(&self, entity: Entity) -> &T {
+        self.m.get(&entity).unwrap()
+    }
+
+    fn get_mut(&mut self, entity: Entity) -> Option<&mut T> {
+        self.m.get_mut(&entity)
+    }
+
+    #[inline]
+    unsafe fn get_unchecked_mut(&mut self, entity: Entity) -> &mut T {
+        self.m.get_mut(&entity).unwrap()
     }
 }
 
@@ -300,50 +347,6 @@ impl<T> VecStorage<T> {
         }
     }
 
-    /// Gets an immutable reference to entity data.
-    pub fn get(&self, entity: Entity) -> Option<&T> {
-        let index = entity.index() as usize;
-        if self.g.len() > index && self.g[index] == Some(entity.generation()) {
-            return Some(&self.v[index]);
-        }
-        None
-    }
-
-    /// Gets an immutable reference to entity data without performing bounds
-    /// and liveness checks.
-    ///
-    /// # Safety
-    ///
-    /// This function performs no bounds checking. Requesting data for an entity
-    /// index that does not represent a living entity with data in this resource
-    /// will return an undefined result.
-    #[inline]
-    pub unsafe fn get_unchecked(&self, index: Index) -> &T {
-        self.v.get_unchecked(index as usize)
-    }
-
-    /// Gets a mutable reference to entity data.
-    pub fn get_mut(&mut self, entity: Entity) -> Option<&mut T> {
-        let index = entity.index() as usize;
-        if self.g.len() > index && self.g[index] == Some(entity.generation()) {
-            return Some(&mut self.v[index]);
-        }
-        None
-    }
-
-    /// Gets a mutable reference to entity data without performing bounds and
-    /// liveness checks.
-    ///
-    /// # Safety
-    ///
-    /// This function performs no bounds checking. Requesting data for an entity
-    /// index that does not represent a living entity with data in this resource
-    /// will return an undefined result.
-    #[inline]
-    pub unsafe fn get_unchecked_mut(&mut self, index: Index) -> &mut T {
-        self.v.get_unchecked_mut(index as usize)
-    }
-
     /// Gets an iterator over immutable references to all entity data stored in the resource.
     pub fn iter(&self) -> VecStorageIter<T> {
         VecStorageIter {
@@ -360,6 +363,36 @@ impl<T> VecStorage<T> {
             iter: self.v.iter_mut(),
             g: &self.g,
         }
+    }
+}
+
+impl<T> ComponentResourceApi for VecStorage<T> {
+    type Component = T;
+
+    fn get(&self, entity: Entity) -> Option<&T> {
+        let index = entity.index() as usize;
+        if self.g.len() > index && self.g[index] == Some(entity.generation()) {
+            return Some(&self.v[index]);
+        }
+        None
+    }
+
+    #[inline]
+    unsafe fn get_unchecked(&self, entity: Entity) -> &T {
+        self.v.get_unchecked(entity.index() as usize)
+    }
+
+    fn get_mut(&mut self, entity: Entity) -> Option<&mut T> {
+        let index = entity.index() as usize;
+        if self.g.len() > index && self.g[index] == Some(entity.generation()) {
+            return Some(&mut self.v[index]);
+        }
+        None
+    }
+
+    #[inline]
+    unsafe fn get_unchecked_mut(&mut self, entity: Entity) -> &mut T {
+        self.v.get_unchecked_mut(entity.index() as usize)
     }
 }
 
@@ -438,7 +471,7 @@ mod tests {
         map.add(entity, 5u32);
         assert_eq!(*map.get(entity).unwrap(), 5u32);
 
-        let (bitset, api) = map.deconstruct();
+        let (bitset, api) = <MapResource<u32> as EntityResource>::deconstruct(&map);
         assert!(bitset.contains(entity.index()));
         assert_eq!(*api.get(entity).unwrap(), 5u32);
     }
@@ -451,7 +484,7 @@ mod tests {
         map.add(entity, 5u32);
         assert_eq!(*map.get(entity).unwrap(), 5u32);
 
-        let (bitset, api) = map.deconstruct_mut();
+        let (bitset, api) = <MapResource<u32> as EntityResource>::deconstruct_mut(map);
         assert!(bitset.contains(entity.index()));
         assert_eq!(*api.get(entity).unwrap(), 5u32);
         *api.get_mut(entity).unwrap() = 6u32;
@@ -521,7 +554,7 @@ mod tests {
             scope.run_r2w1(|ctx, map: &MapResource<u32>, vec: &VecResource<u32>, out: &mut VecResource<u64>| {
                 ctx.iter().r2w1(map, vec, out, |iter, m, v, o| {
                     for e in iter {
-                        let x = unsafe { o.get_unchecked_mut(e.index()) };
+                        let x = unsafe { o.get_unchecked_mut(e) };
                         *x = (*v.get(e).unwrap() + *m.get(e).unwrap()) as u64;
                     }
                 });

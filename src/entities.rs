@@ -210,8 +210,8 @@ macro_rules! impl_iter_entities {
         /// allowing any operations which would invalidate the entity iterator.
         #[allow(non_snake_case)]
         pub fn $name<'a, $($read,)* $($write,)* F, R>(&self, $($read: &$read,)* $($write: &mut $write,)* f: F) -> R
-            where $($read:EntityResource,)*
-                  $($write:EntityResource,)*
+            where $($read: EntityResource,)*
+                  $($write: EntityResource,)*
                   F: FnOnce(EntityIter<'b, $iter>, $(&$read::Api,)* $(&mut $write::Api,)*) -> R + 'a
         {
             $(let $read = $read.deconstruct();)*
@@ -243,6 +243,61 @@ impl_iter_entities!(r4w0 [R0, R1, R2, R3] [] [BitIter<BitSetAnd<BitSetAnd<&BitSe
 impl_iter_entities!(r4w1 [R0, R1, R2, R3] [W1] [BitIter<BitSetAnd<BitSetAnd<&BitSet, &BitSet>, BitSetAnd<&BitSet, BitSetAnd<&BitSet, &BitSet>>>>]);
 impl_iter_entities!(r4w2 [R0, R1, R2, R3] [W1, W2] [BitIter<BitSetAnd<BitSetAnd<&BitSet, BitSetAnd<&BitSet, &BitSet>>, BitSetAnd<&BitSet, BitSetAnd<&BitSet, &BitSet>>>>]);
 impl_iter_entities!(r4w3 [R0, R1, R2, R3] [W1, W2, W3] [BitIter<BitSetAnd<BitSetAnd<&BitSet, BitSetAnd<&BitSet, &BitSet>>, BitSetAnd<BitSetAnd<&BitSet, &BitSet>, BitSetAnd<&BitSet, &BitSet>>>>]);
+
+macro_rules! impl_iter_components {
+    ($name:ident [$($read:ident : $read_api:ident),*] [$($write:ident : $write_api:ident),*]) => (
+        impl<'b> EntityIterBuilder<'b> {
+        /// Constructs an iterator which yields each entity with
+        /// data stored in all given entity resources.
+        ///
+        /// This function borrows each resource, preventing mutation of the
+        /// resource for the duration of its' scope. However, the user is
+        /// provided with restricted APIs for each resource which may allow
+        /// mutable access to entity data stored within the resource, without
+        /// allowing any operations which would invalidate the entity iterator.
+        #[allow(non_snake_case)]
+        pub fn $name<'a, $($read, $read_api,)* $($write, $write_api,)* F>(&self, $($read: &$read,)* $($write: &mut $write,)* mut f: F)
+            where $($read: EntityResource<Api=$read_api>,)*
+                  $($read_api: ComponentResourceApi,)*
+                  $($write: EntityResource<Api=$write_api>,)*
+                  $($write_api: ComponentResourceApi,)*
+                  F: FnMut(Entity, 
+                           $(&<<$read as EntityResource>::Api as ComponentResourceApi>::Component,)*
+                           $(&mut <<$write as EntityResource>::Api as ComponentResourceApi>::Component,)*) + 'a
+        {
+            $(let $read = $read.deconstruct();)*
+            $(let $write = $write.deconstruct_mut();)*
+            let iter = ($($read.0,)* $($write.0,)*).and().iter();
+            
+            for e in EntityIter::new(self.entities, iter) {
+                f(e, 
+                  $(unsafe{$read.1.get_unchecked(e)},)*
+                  $(unsafe{$write.1.get_unchecked_mut(e)},)*)
+            }
+        }
+        }
+    )
+}
+
+impl_iter_components!(components_r0w1 [] [W0:W0Api]);
+impl_iter_components!(components_r0w2 [] [W0:W0Api, W1:W1Api]);
+impl_iter_components!(components_r0w3 [] [W0:W0Api, W1:W1Api, W2:W2Api]);
+// impl_iter_components!(components_r1w0 [R0] []);
+impl_iter_components!(components_r1w1 [R0:R0Api] [W0:W0Api]);
+// impl_iter_components!(components_r1w2 [R0] [W0, W1]);
+// impl_iter_components!(components_r1w3 [R0] [W0, W1, W3]);
+// impl_iter_components!(components_r2w0 [R0, R1] []);
+// impl_iter_components!(components_r2w1 [R0, R1] [W0]);
+// impl_iter_components!(components_r2w2 [R0, R1] [W0, W1]);
+// impl_iter_components!(components_r2w3 [R0, R1] [W0, W1, W3]);
+// impl_iter_components!(components_r3w0 [R0, R1, R2] []);
+// impl_iter_components!(components_r3w1 [R0, R1, R2] [W1]);
+// impl_iter_components!(components_r3w2 [R0, R1, R2] [W1, W2]);
+// impl_iter_components!(components_r3w3 [R0, R1, R2] [W1, W2, W3]);
+// impl_iter_components!(components_r4w0 [R0, R1, R2, R3] []);
+// impl_iter_components!(components_r4w1 [R0, R1, R2, R3] [W1]);
+// impl_iter_components!(components_r4w2 [R0, R1, R2, R3] [W1, W2]);
+// impl_iter_components!(components_r4w3 [R0, R1, R2, R3] [W1, W2, W3]);
 
 // todo: find out why the compiler gets confused when using associated types in
 // the FnOnce with iter_entities for the iterator and BitSet.
