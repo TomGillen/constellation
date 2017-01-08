@@ -282,22 +282,22 @@ macro_rules! impl_iter_components {
 impl_iter_components!(components_r0w1 [] [W0:W0Api]);
 impl_iter_components!(components_r0w2 [] [W0:W0Api, W1:W1Api]);
 impl_iter_components!(components_r0w3 [] [W0:W0Api, W1:W1Api, W2:W2Api]);
-// impl_iter_components!(components_r1w0 [R0] []);
+impl_iter_components!(components_r1w0 [R0:R0Api] []);
 impl_iter_components!(components_r1w1 [R0:R0Api] [W0:W0Api]);
-// impl_iter_components!(components_r1w2 [R0] [W0, W1]);
-// impl_iter_components!(components_r1w3 [R0] [W0, W1, W3]);
-// impl_iter_components!(components_r2w0 [R0, R1] []);
-// impl_iter_components!(components_r2w1 [R0, R1] [W0]);
-// impl_iter_components!(components_r2w2 [R0, R1] [W0, W1]);
-// impl_iter_components!(components_r2w3 [R0, R1] [W0, W1, W3]);
-// impl_iter_components!(components_r3w0 [R0, R1, R2] []);
-// impl_iter_components!(components_r3w1 [R0, R1, R2] [W1]);
-// impl_iter_components!(components_r3w2 [R0, R1, R2] [W1, W2]);
-// impl_iter_components!(components_r3w3 [R0, R1, R2] [W1, W2, W3]);
-// impl_iter_components!(components_r4w0 [R0, R1, R2, R3] []);
-// impl_iter_components!(components_r4w1 [R0, R1, R2, R3] [W1]);
-// impl_iter_components!(components_r4w2 [R0, R1, R2, R3] [W1, W2]);
-// impl_iter_components!(components_r4w3 [R0, R1, R2, R3] [W1, W2, W3]);
+impl_iter_components!(components_r1w2 [R0:R0Api] [W0:W0Api, W1:W1Api]);
+impl_iter_components!(components_r1w3 [R0:R0Api] [W0:W0Api, W1:W1Api, W2:W2Api]);
+impl_iter_components!(components_r2w0 [R0:R0Api, R1:R1Api] []);
+impl_iter_components!(components_r2w1 [R0:R0Api, R1:R1Api] [W0:W0Api]);
+impl_iter_components!(components_r2w2 [R0:R0Api, R1:R1Api] [W0:W0Api, W1:W1Api]);
+impl_iter_components!(components_r2w3 [R0:R0Api, R1:R1Api] [W0:W0Api, W1:W1Api, W3:W2Api]);
+impl_iter_components!(components_r3w0 [R0:R0Api, R1:R1Api, R2:R2Api] []);
+impl_iter_components!(components_r3w1 [R0:R0Api, R1:R1Api, R2:R2Api] [W0:W0Api]);
+impl_iter_components!(components_r3w2 [R0:R0Api, R1:R1Api, R2:R2Api] [W0:W0Api, W1:W1Api]);
+impl_iter_components!(components_r3w3 [R0:R0Api, R1:R1Api, R2:R2Api] [W0:W0Api, W1:W1Api, W3:W2Api]);
+impl_iter_components!(components_r4w0 [R0:R0Api, R1:R1Api, R2:R2Api, R3:R3Api] []);
+impl_iter_components!(components_r4w1 [R0:R0Api, R1:R1Api, R2:R2Api, R3:R3Api] [W0:W0Api]);
+impl_iter_components!(components_r4w2 [R0:R0Api, R1:R1Api, R2:R2Api, R3:R3Api] [W0:W0Api, W1:W1Api]);
+impl_iter_components!(components_r4w3 [R0:R0Api, R1:R1Api, R2:R2Api, R3:R3Api] [W0:W0Api, W1:W1Api, W3:W2Api]);
 
 // todo: find out why the compiler gets confused when using associated types in
 // the FnOnce with iter_entities for the iterator and BitSet.
