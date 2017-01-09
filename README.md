@@ -16,6 +16,8 @@ Systems request read or write access to a set of resources, which can then be sc
 be potentially executed in parallel by recording them into a `SystemCommandBuffer` and
 executing the command buffer within a `World`.
 
+Constellation is heavily influenced by the [Bitsquid engine](http://bitsquid.blogspot.com) (now Autodesk Stingray), the [Molecule Engine](https://blog.molecular-matters.com) and [Specs](https://github.com/slide-rs/specs).
+
 [Crates.io](https://crates.io/crates/constellation)  
 [Documentation](https://docs.rs/constellation)
 
