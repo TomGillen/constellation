@@ -3,10 +3,14 @@
 A data-oriented entity component system optimized for cache coherent resource access
 and parallel system execution.
 
-Constellation does not have any native understanding of a "component". Instead, the library
-is concerned about ensuring safe concurrent access to shared resources, while providing direct
-access to each resource's own APIs. These resources may store per-entity data such as
-positions, or may represent application wide services such as asset loaders or input devices.
+Constellation takes a "resource-first" approach to an ECS, where rather than focusing on 
+components, the library is concerned about ensuring safe concurrent access to shared resources,
+while providing direct access to each resource's own APIs. These resources may store per-entity
+data such as positions, or may represent application wide services such as asset loaders
+or input devices.
+
+Methods for iterating through entity component data are built on top of the direct resource
+access APIs.
 
 Systems request read or write access to a set of resources, which can then be scheduled to
 be potentially executed in parallel by recording them into a `SystemCommandBuffer` and
