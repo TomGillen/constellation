@@ -52,39 +52,33 @@ Update the world with Systems:
 ```rust
 let mut update = SystemCommandBuffer::default();
 update.queue_systems(|scope| {
-    scope.run_r1w1(|entities, velocities: &Velocities, positions: &mut Positions| {
+    scope.run_r1w1(|ctx, velocities: &Velocities, positions: &mut Positions| {
         println!("Updating positions");
-
-        // iterate through all entities with data in both position and velocity resources
-        iter_entities_r1w1(velocities, positions, |entity_iter, v, p| {
-            // `v` and `p` allow (mutable in the case of `p`) access to entity data inside
-            // the resource without the ability to add or remove entities from the resource
-            // - which would otherwise invalidate the iterator
-            for i in entity_iter {
-                // unchecked getters offer direct indexing
-                let position = unsafe { p.get_unchecked_mut(i) };
-                let velocity = unsafe { v.get_unchecked(i) };
-                position.x += velocity.x;
-                position.y += velocity.y;
-                position.z += velocity.z;
-            }
+        // iterate through all components for entities with data in both
+        // position and velocity resources
+        ctx.iter_r1w1(velocities, positions).components(|entity, v, p| {
+                p.x += v.x;
+                p.y += v.y;
+                p.z += v.z;
         });
     });
 
-    scope.run_r2w0(|entities, names: &DebugNames, positions: &Positions| {
+    scope.run_r2w0(|ctx, names: &DebugNames, positions: &Positions| {
         println!("Printing positions");
-
-        iter_entities_r2w0(names, positions, |entity_iter, n, p| {
-            for i in entity_iter {
-                let entity = entities.by_index(i);
+        // iterate through all entity IDs for entities with data in both
+        // `names` and `positions`
+        ctx.iter_r2w0(names, positions).entities(|entity_iter, n, p| {
+            // `n` and `p` allow (potentially mutable) access to entity data inside
+            // the resource without the ability to add or remove entities from the resource
+            // - which would otherwise invalidate the iterator
+            for e in entity_iter {
                 println!("Entity {} is at {:?}",
-                         n.get(entity).unwrap().name,
-                         p.get(entity).unwrap());
+                         n.get(e).unwrap().name,
+                         p.get(e).unwrap());
             }
         });
     });
 });
-
 world.run(&mut update);
 ```
 

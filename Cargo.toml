@@ -1,6 +1,6 @@
 [package]
 name = "constellation"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Thomas Gillen <thomas.gillen@googlemail.com>"]
 description = "A data-oriented entity component system optimized for cache coherent resource access and parallel system execution."
 repository = "https://github.com/TomGillen/constellation/"

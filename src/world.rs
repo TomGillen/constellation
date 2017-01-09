@@ -11,6 +11,8 @@ use arrayvec::ArrayVec;
 
 use entities::*;
 use resource::*;
+use bitset::*;
+use join::*;
 
 bitflags! {
     flags ResourceDescription: u32 {
@@ -160,43 +162,6 @@ trait System<S: Send + Sync + 'static>: Send {
     fn execute(&mut self, &World, &S) -> EntityChangeSet;
 }
 
-/// Contains system execution state information.
-pub struct SystemContext<'a, S: Send + Sync + 'static> {
-    entities: &'a Entities,
-    transaction: EntitiesTransaction<'a>,
-    state: &'a S,
-}
-
-impl<'a, S: Send + Sync + 'static> Deref for SystemContext<'a, S> {
-    type Target = EntitiesTransaction<'a>;
-
-    fn deref(&self) -> &EntitiesTransaction<'a> {
-        &self.transaction
-    }
-}
-
-impl<'a, S: Send + Sync + 'static> DerefMut for SystemContext<'a, S> {
-    fn deref_mut(&mut self) -> &mut EntitiesTransaction<'a> {
-        &mut self.transaction
-    }
-}
-
-impl<'a, S: Send + Sync + 'static> SystemContext<'a, S> {
-    /// Gets the current system execution state.
-    pub fn state(&self) -> &S {
-        self.state
-    }
-
-    /// Gets the entity iterator.
-    pub fn iter(&self) -> EntityIterBuilder<'a> {
-        EntityIterBuilder::new(self.entities)
-    }
-
-    fn to_change_set(self) -> EntityChangeSet {
-        self.transaction.to_change_set()
-    }
-}
-
 struct FnSystem<S, F>
     where F: FnMut(&World, &S) -> EntityChangeSet + Send,
           S: Send + Sync + 'static
@@ -225,14 +190,52 @@ impl<S: Send + Sync + 'static, T: FnMut(&World, &S) -> EntityChangeSet + Send> S
     }
 }
 
-/// Records system executions, to be run later within a `World`.
-pub struct SystemCommandBuffer<S: Send + Sync + 'static = ()> {
-    batches: Vec<Vec<Box<System<S>>>>,
+/// Contains system execution state information.
+pub struct SystemContext<'a, S: Send + Sync + 'static> {
+    entities: &'a Entities,
+    transaction: EntitiesTransaction<'a>,
+    state: &'a S,
+}
+
+impl<'a, S: Send + Sync + 'static> Deref for SystemContext<'a, S> {
+    type Target = EntitiesTransaction<'a>;
+
+    fn deref(&self) -> &EntitiesTransaction<'a> {
+        &self.transaction
+    }
+}
+
+impl<'a, S: Send + Sync + 'static> DerefMut for SystemContext<'a, S> {
+    fn deref_mut(&mut self) -> &mut EntitiesTransaction<'a> {
+        &mut self.transaction
+    }
+}
+
+impl<'a, S: Send + Sync + 'static> SystemContext<'a, S> {
+    /// Gets the current system execution state.
+    pub fn state(&self) -> &S {
+        self.state
+    }
+
+    fn to_change_set(self) -> EntityChangeSet {
+        self.transaction.to_change_set()
+    }
 }
 
 /// Systems queued within a `SystemScope` may be scheduled to run in parallel.
 pub struct SystemScope<S: Send + Sync + 'static> {
     systems: Vec<Box<System<S>>>,
+}
+
+impl<S: Send + Sync + 'static> SystemScope<S> {
+    fn new() -> SystemScope<S> {
+        SystemScope { systems: Vec::new() }
+    }
+}
+
+/// Records system executions, to be run later within a `World`.
+pub struct SystemCommandBuffer<S: Send + Sync + 'static = ()> {
+    batches: Vec<Vec<Box<System<S>>>>,
 }
 
 impl SystemCommandBuffer<()> {
@@ -287,12 +290,6 @@ fn can_batch_system(reading: &HashSet<TypeId>, writing: &HashSet<TypeId>, (syste
     // the system does not write to any resources being read (which includes writers)
     // the system does not read any resources that are being written
     reading.is_disjoint(system_writes) && writing.is_disjoint(system_reads)
-}
-
-impl<S: Send + Sync + 'static> SystemScope<S> {
-    fn new() -> SystemScope<S> {
-        SystemScope { systems: Vec::new() }
-    }
 }
 
 macro_rules! impl_run_system {
@@ -468,6 +465,128 @@ impl World {
         self.changes_buffer = Some(changes);
     }
 }
+
+/// Provides methods for efficiently iterating through entity resources.
+pub struct EntityIteratorBuilder<'a, R, W> {
+    entities: &'a Entities,
+    read_resources: R,
+    write_resources: W,
+}
+
+impl<'a, R, W> EntityIteratorBuilder<'a, R, W> {
+    /// Constructs a new `EntityIteratorBuilder`.
+    fn new(entities: &'a Entities, read_resources: R, write_resources: W) -> EntityIteratorBuilder<'a, R, W> {
+        EntityIteratorBuilder {
+            entities: entities,
+            read_resources: read_resources,
+            write_resources: write_resources,
+        }
+    }
+}
+
+macro_rules! impl_entity_iterators {
+    ($name:ident [$($read:ident : $read_api:ident),*] [$($write:ident : $write_api:ident),*] [$iter:ty]) => (
+        impl<'a, S: Sync + Send> SystemContext<'a, S> {
+            /// Constructs an entity iterator builder for performing iterations
+            /// over the given resources.
+            #[allow(non_snake_case)]
+            pub fn $name<'b, $($read,)* $($write,)*>(&self, $($read: &'b $read,)* $($write: &'b mut $write,)*) -> EntityIteratorBuilder<'a, ($(&'b $read,)*), ($(&'b mut $write,)*)> 
+                where $($read: EntityResource,)*
+                      $($write: EntityResource,)*
+            {
+                EntityIteratorBuilder::new(self.entities, ($($read,)*), ($($write,)*))
+            }
+        }
+
+        impl<'b, 'c, $($read,)* $($write,)*> EntityIteratorBuilder<'b, ($(&'c $read,)*), ($(&'c mut $write,)*)>
+            where $($read: EntityResource,)*
+                  $($write: EntityResource,)*
+        {
+            /// Constructs an iterator which yields each entity with
+            /// data stored in all given entity resources.
+            ///
+            /// This function borrows each resource, preventing mutation of the
+            /// resource for the duration of its' scope. However, the user is
+            /// provided with restricted APIs for each resource which may allow
+            /// mutable access to entity data stored within the resource, without
+            /// allowing any operations which would invalidate the entity iterator.
+            #[allow(non_snake_case)]
+            pub fn entities<'a, F, R>(&mut self, f: F) -> R
+                where F: FnOnce(EntityIter<'b, $iter>, $(&$read::Api,)* $(&mut $write::Api,)*) -> R + 'a
+            {
+                let ($(ref $read,)*) = self.read_resources;
+                let ($(ref mut $write,)*) = self.write_resources;
+                $(let $read = $read.deconstruct();)*
+                $(let $write = $write.deconstruct_mut();)*
+                let iter = ($($read.0,)* $($write.0,)*).and().iter();
+
+                f(EntityIter::new(self.entities, iter), $($read.1,)* $($write.1,)*)
+            }
+        }
+
+        impl<'b, 'c, $($read, $read_api,)* $($write, $write_api,)*> EntityIteratorBuilder<'b, ($(&'c $read,)*), ($(&'c mut $write,)*)>
+            where $($read: EntityResource<Api=$read_api>,)*
+                  $($write: EntityResource<Api=$write_api>,)*
+                  $($read_api: ComponentResourceApi,)*
+                  $($write_api: ComponentResourceApi,)*
+        {
+            /// Constructs an iterator which yields the components associated
+            /// with all entities which have data stored in all of the given
+            /// resources.
+            #[allow(non_snake_case)]
+            pub fn components<'a, F>(&mut self, mut f: F)
+                where F: FnMut(Entity, 
+                            $(&<<$read as EntityResource>::Api as ComponentResourceApi>::Component,)*
+                            $(&mut <<$write as EntityResource>::Api as ComponentResourceApi>::Component,)*) + 'a
+            {
+                let ($(ref $read,)*) = self.read_resources;
+                let ($(ref mut $write,)*) = self.write_resources;
+                $(let $read = $read.deconstruct();)*
+                $(let $write = $write.deconstruct_mut();)*
+                let iter = ($($read.0,)* $($write.0,)*).and().iter();
+                
+                for e in EntityIter::new(self.entities, iter) {
+                    f(e, 
+                      $(unsafe{$read.1.get_unchecked(e)},)*
+                      $(unsafe{$write.1.get_unchecked_mut(e)},)*)
+                }
+            }
+        }
+    )
+}
+
+// todo: Find out why the compiler gets confused when using associated types in
+// the FnOnce with iterate entities for the iterator and BitSet.
+// Solving this would eliminate the need to provide the iterator type in the
+// macro invocations, and allow EntityResources to specify alternate BitSetLike
+// filters via associated types.
+//
+// The following expression expands out to the iterator type provided in the
+// below macro expansions:
+// `BitIter<<($(&$read::Filter,)* $(&$write::Filter,)*) as BitAnd>::Value>`
+//
+// The compiler does not expand this expression correctly when it is a parameter
+// in an FnOnce type. It does elsewhere.
+
+impl_entity_iterators!(iter_r0w1 [] [W0:W0Api] [BitIter<&BitSet>]);
+impl_entity_iterators!(iter_r0w2 [] [W0:W0Api, W1:W1Api] [BitIter<BitSetAnd<&BitSet, &BitSet>>]);
+impl_entity_iterators!(iter_r0w3 [] [W0:W0Api, W1:W1Api, W2:W2Api] [BitIter<BitSetAnd<&BitSet, BitSetAnd<&BitSet, &BitSet>>>]);
+impl_entity_iterators!(iter_r1w0 [R0:R0Api] [] [BitIter<&BitSet>]);
+impl_entity_iterators!(iter_r1w1 [R0:R0Api] [W0:W0Api] [BitIter<BitSetAnd<&BitSet, &BitSet>>]);
+impl_entity_iterators!(iter_r1w2 [R0:R0Api] [W0:W0Api, W1:W1Api] [BitIter<BitSetAnd<&BitSet, BitSetAnd<&BitSet, &BitSet>>>]);
+impl_entity_iterators!(iter_r1w3 [R0:R0Api] [W0:W0Api, W1:W1Api, W2:W2Api] [BitIter<BitSetAnd<BitSetAnd<&BitSet, &BitSet>, BitSetAnd<&BitSet, &BitSet>>>]);
+impl_entity_iterators!(iter_r2w0 [R0:R0Api, R1:R1Api] [] [BitIter<BitSetAnd<&BitSet, &BitSet>>]);
+impl_entity_iterators!(iter_r2w1 [R0:R0Api, R1:R1Api] [W0:W0Api] [BitIter<BitSetAnd<&BitSet, BitSetAnd<&BitSet, &BitSet>>>]);
+impl_entity_iterators!(iter_r2w2 [R0:R0Api, R1:R1Api] [W0:W0Api, W1:W1Api] [BitIter<BitSetAnd<BitSetAnd<&BitSet, &BitSet>, BitSetAnd<&BitSet, &BitSet>>>]);
+impl_entity_iterators!(iter_r2w3 [R0:R0Api, R1:R1Api] [W0:W0Api, W1:W1Api, W3:W2Api] [BitIter<BitSetAnd<BitSetAnd<&BitSet, &BitSet>, BitSetAnd<&BitSet, BitSetAnd<&BitSet, &BitSet>>>>]);
+impl_entity_iterators!(iter_r3w0 [R0:R0Api, R1:R1Api, R2:R2Api] [] [BitIter<BitSetAnd<&BitSet, BitSetAnd<&BitSet, &BitSet>>>]);
+impl_entity_iterators!(iter_r3w1 [R0:R0Api, R1:R1Api, R2:R2Api] [W0:W0Api] [BitIter<BitSetAnd<BitSetAnd<&BitSet, &BitSet>, BitSetAnd<&BitSet, &BitSet>>>]);
+impl_entity_iterators!(iter_r3w2 [R0:R0Api, R1:R1Api, R2:R2Api] [W0:W0Api, W1:W1Api] [BitIter<BitSetAnd<BitSetAnd<&BitSet, &BitSet>, BitSetAnd<&BitSet, BitSetAnd<&BitSet, &BitSet>>>>]);
+impl_entity_iterators!(iter_r3w3 [R0:R0Api, R1:R1Api, R2:R2Api] [W0:W0Api, W1:W1Api, W3:W2Api][BitIter<BitSetAnd<BitSetAnd<&BitSet, BitSetAnd<&BitSet, &BitSet>>, BitSetAnd<&BitSet, BitSetAnd<&BitSet, &BitSet>>>>]);
+impl_entity_iterators!(iter_r4w0 [R0:R0Api, R1:R1Api, R2:R2Api, R3:R3Api] [] [BitIter<BitSetAnd<BitSetAnd<&BitSet, &BitSet>, BitSetAnd<&BitSet, &BitSet>>>]);
+impl_entity_iterators!(iter_r4w1 [R0:R0Api, R1:R1Api, R2:R2Api, R3:R3Api] [W0:W0Api] [BitIter<BitSetAnd<BitSetAnd<&BitSet, &BitSet>, BitSetAnd<&BitSet, BitSetAnd<&BitSet, &BitSet>>>>]);
+impl_entity_iterators!(iter_r4w2 [R0:R0Api, R1:R1Api, R2:R2Api, R3:R3Api] [W0:W0Api, W1:W1Api] [BitIter<BitSetAnd<BitSetAnd<&BitSet, BitSetAnd<&BitSet, &BitSet>>, BitSetAnd<&BitSet, BitSetAnd<&BitSet, &BitSet>>>>]);
+impl_entity_iterators!(iter_r4w3 [R0:R0Api, R1:R1Api, R2:R2Api, R3:R3Api] [W0:W0Api, W1:W1Api, W3:W2Api] [BitIter<BitSetAnd<BitSetAnd<&BitSet, BitSetAnd<&BitSet, &BitSet>>, BitSetAnd<BitSetAnd<&BitSet, &BitSet>, BitSetAnd<&BitSet, &BitSet>>>>]);
 
 #[cfg(test)]
 mod tests {
@@ -807,7 +926,7 @@ mod tests {
 
             scope.run_r1w0(|ctx, resource: &VecResource<u32>| {
                 println!("Verifying entity creation");
-                ctx.iter().r1w0(resource, |iter, r| {
+                ctx.iter_r1w0(resource).entities(|iter, r| {
                     for e in iter {
                         assert_eq!(e.index(), *r.get(e).unwrap());
                     }
@@ -818,7 +937,7 @@ mod tests {
             scope.run_r0w1(|ctx, resource: &mut VecResource<u32>| {
                 println!("Deleting entities");
                 let mut entities = Vec::<Entity>::new();
-                ctx.iter().r1w0(resource, |iter, _| {
+                ctx.iter_r1w0(resource).entities(|iter, _| {
                     for e in iter {
                         entities.push(e);
                     }
@@ -833,7 +952,7 @@ mod tests {
             scope.run_r1w0(|ctx, resource: &VecResource<u32>| {
                 println!("Verifying entity deletion");
                 let mut entities = Vec::<Entity>::new();
-                ctx.iter().r1w0(resource, |iter, _| {
+                ctx.iter_r1w0(resource).entities(|iter, _| {
                     for e in iter {
                         entities.push(e);
                     }

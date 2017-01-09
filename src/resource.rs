@@ -552,7 +552,7 @@ mod tests {
             });
 
             scope.run_r2w1(|ctx, map: &MapResource<u32>, vec: &VecResource<u32>, out: &mut VecResource<u64>| {
-                ctx.iter().r2w1(map, vec, out, |iter, m, v, o| {
+                ctx.iter_r2w1(map, vec, out).entities(|iter, m, v, o| {
                     for e in iter {
                         let x = unsafe { o.get_unchecked_mut(e) };
                         *x = (*v.get(e).unwrap() + *m.get(e).unwrap()) as u64;
@@ -563,7 +563,7 @@ mod tests {
             scope.run_r3w0(|ctx, map: &MapResource<u32>, vec: &VecResource<u32>, out: &VecResource<u64>| {
                 let mut checked = 0;
 
-                ctx.iter().r3w0(map, vec, out, |iter, m, v, o| {
+                ctx.iter_r3w0(map, vec, out).entities(|iter, m, v, o| {
                     for e in iter {
                         assert_eq!(*o.get(e).unwrap(),
                                    (m.get(e).unwrap() + v.get(e).unwrap()) as u64);

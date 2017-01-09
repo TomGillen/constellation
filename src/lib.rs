@@ -76,26 +76,24 @@
 //!     scope.run_r1w1(|ctx, velocities: &Velocities, positions: &mut Positions| {
 //!         println!("Updating positions");
 //!
-//!         // iterate through all entities with data in both position and velocity resources
-//!         ctx.iter().r1w1(velocities, positions, |entity_iter, v, p| {
-//!             // `v` and `p` allow (mutable in the case of `p`) access to entity data inside
-//!             // the resource without the ability to add or remove entities from the resource
-//!             // - which would otherwise invalidate the iterator
-//!             for e in entity_iter {
-//!                 // unchecked getters offer direct indexing
-//!                 let position = unsafe { p.get_unchecked_mut(e) };
-//!                 let velocity = unsafe { v.get_unchecked(e) };
-//!                 position.x += velocity.x;
-//!                 position.y += velocity.y;
-//!                 position.z += velocity.z;
-//!             }
+//!         // iterate through all components for entities with data in both
+//!         // position and velocity resources
+//!         ctx.iter_r1w1(velocities, positions).components(|entity, v, p| {
+//!             p.x += v.x;
+//!             p.y += v.y;
+//!             p.z += v.z;
 //!         });
 //!     });
 //!
 //!     scope.run_r2w0(|ctx, names: &DebugNames, positions: &Positions| {
 //!         println!("Printing positions");
 //!
-//!         ctx.iter().r2w0(names, positions, |entity_iter, n, p| {
+//!         // iterate through all entity IDs for entities with data in both
+//!         // `names` and `positions`
+//!         ctx.iter_r2w0(names, positions).entities(|entity_iter, n, p| {
+//!             // `n` and `p` allow (potentially mutable) access to entity data inside
+//!             // the resource without the ability to add or remove entities from the resource
+//!             // - which would otherwise invalidate the iterator
 //!             for e in entity_iter {
 //!                 println!("Entity {} is at {:?}",
 //!                          n.get(e).unwrap().name,
@@ -192,7 +190,7 @@ mod tests {
             scope.run_r1w1(|ctx, velocities: &Velocities, positions: &mut Positions| {
                 println!("Updating positions");
 
-                ctx.iter().components_r1w1(velocities, positions, |e, v, p| {
+                ctx.iter_r1w1(velocities, positions).components(|e, v, p| {
                     p.x += v.x;
                     p.y += v.y;
                     p.z += v.z;
