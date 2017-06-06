@@ -10,10 +10,14 @@ license = "Apache-2.0"
 keywords = ["game", "gamedev", "ecs"]
 
 [dependencies]
-fnv = "1.0.3"
-crossbeam = "0.2"
-rayon = "0.6.0"
-arrayvec = "0.3.20"
+fnv = "1.0.5"
+crossbeam = "0.2.10"
+rayon = "0.7.0"
+arrayvec = "0.3.22"
 tuple_utils = "0.2"
-atom = "0.3"
-bitflags = "0.7.0"
+atom = "0.3.4"
+bitflags = "0.8.2"
+
+[dev-dependencies]
+serde_derive = "0.9"
+serde = "0.9"

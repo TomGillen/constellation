@@ -27,10 +27,6 @@ struct ResourceCell {
 }
 
 impl ResourceCell {
-    // pub unsafe fn get(&self) -> &Resource {
-    //     (&*self.cell.get()).deref()
-    // }
-
     pub unsafe fn get_mut(&self) -> &mut Resource {
         (&mut *self.cell.get()).deref_mut()
     }
@@ -87,6 +83,7 @@ pub struct World {
     resources: FnvHashMap<TypeId, (u8, ResourceCell)>,
     entity_resources: Vec<TypeId>,
     changes_buffer: Option<Vec<EntityChangeSet>>,
+    parallism_threshold: usize,
 }
 
 // resource access is ensured safe by the system scheduler
@@ -100,6 +97,7 @@ impl World {
             resources: FnvHashMap::default(),
             entity_resources: Vec::new(),
             changes_buffer: Some(Vec::new()),
+            parallism_threshold: 2,
         }
     }
 
@@ -376,6 +374,20 @@ impl_run_system!(run_r3w3 [R0, R1, R2] [W0, W1, W2]);
 impl_run_system!(run_r4w3 [R0, R1, R2, R3] [W0, W1, W2]);
 impl_run_system!(run_r5w3 [R0, R1, R2, R3, R4] [W0, W1, W2]);
 impl_run_system!(run_r6w3 [R0, R1, R2, R3, R4, R5] [W0, W1, W2]);
+impl_run_system!(run_r0w4 [] [W0, W1, W2, W3]);
+impl_run_system!(run_r1w4 [R0] [W0, W1, W2, W3]);
+impl_run_system!(run_r2w4 [R0, R1] [W0, W1, W2, W3]);
+impl_run_system!(run_r3w4 [R0, R1, R2] [W0, W1, W2, W3]);
+impl_run_system!(run_r4w4 [R0, R1, R2, R3] [W0, W1, W2, W3]);
+impl_run_system!(run_r5w4 [R0, R1, R2, R3, R4] [W0, W1, W2, W3]);
+impl_run_system!(run_r6w4 [R0, R1, R2, R3, R4, R5] [W0, W1, W2, W3]);
+impl_run_system!(run_r0w5 [] [W0, W1, W2, W3, W4]);
+impl_run_system!(run_r1w5 [R0] [W0, W1, W2, W3, W4]);
+impl_run_system!(run_r2w5 [R0, R1] [W0, W1, W2, W3, W4]);
+impl_run_system!(run_r3w5 [R0, R1, R2] [W0, W1, W2, W3, W4]);
+impl_run_system!(run_r4w5 [R0, R1, R2, R3] [W0, W1, W2, W3, W4]);
+impl_run_system!(run_r5w5 [R0, R1, R2, R3, R4] [W0, W1, W2, W3, W4]);
+impl_run_system!(run_r6w5 [R0, R1, R2, R3, R4, R5] [W0, W1, W2, W3, W4]);
 
 /// Determines the behavior entity transaction commits when running a
 /// system command buffer sequentially.
@@ -399,10 +411,16 @@ impl World {
     /// Executes a `SystemCommandBuffer`, potentially scheduling systems for parallel execution, with the given state.
     pub fn run_with_state<S: Send + Sync + 'static>(&mut self, systems: &mut SystemCommandBuffer<S>, state: &S) {
         self.execute_batched(systems, |world, batch, changes| {
-            batch.par_iter_mut()
-                .weight_max()
-                .map(|system| system.execute(world, state))
-                .collect_into(changes);
+            if batch.len() > world.parallism_threshold {
+                batch.par_iter_mut()
+                    .map(|system| system.execute(world, state))
+                    .collect_into(changes);
+            } 
+            else {
+                for system in batch.iter_mut() {
+                    changes.push(system.execute(world, state));
+                }
+            }
         });
     }
 
@@ -591,8 +609,6 @@ impl_entity_iterators!(iter_r4w3 [R0:R0Api, R1:R1Api, R2:R2Api, R3:R3Api] [W0:W0
 #[cfg(test)]
 mod tests {
     use super::*;
-    use entities::*;
-    use resource::*;
     use std::collections::HashSet;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};

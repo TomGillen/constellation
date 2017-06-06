@@ -460,8 +460,6 @@ impl<'a, T> Iterator for VecStorageIterMut<'a, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use entities::*;
-    use world::*;
 
     #[test]
     fn map_deconstruct() {
