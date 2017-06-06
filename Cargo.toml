@@ -17,6 +17,7 @@ arrayvec = "0.3.22"
 tuple_utils = "0.2"
 atom = "0.3.4"
 bitflags = "0.8.2"
+hibitset = "0.1.2"
 
 [dev-dependencies]
 serde_derive = "0.9"

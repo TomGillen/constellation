@@ -8,10 +8,10 @@ use std::marker::PhantomData;
 use rayon::prelude::*;
 use fnv::FnvHashMap;
 use arrayvec::ArrayVec;
+use hibitset::{BitSet, BitSetLike, BitIter, BitSetAnd};
 
 use entities::*;
 use resource::*;
-use bitset::*;
 use join::*;
 
 bitflags! {

@@ -5,9 +5,9 @@ use std::slice::{Iter, IterMut};
 use std::any::Any;
 
 use fnv::FnvHashMap;
+use hibitset::{BitSet};
 
 use entities::*;
-use bitset::*;
 use world::*;
 
 /// A resource whos system access is controlled by the `World`.

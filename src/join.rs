@@ -5,7 +5,7 @@
 #![allow(missing_docs)]
 
 use tuple_utils::Split;
-use bitset::{BitSetAnd, BitSetLike};
+use hibitset::{BitSetAnd, BitSetLike};
 
 
 /// BitAnd is a helper method to & bitsets togather resulting in a tree

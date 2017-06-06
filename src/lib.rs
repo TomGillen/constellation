@@ -133,12 +133,12 @@ extern crate atom;
 extern crate tuple_utils;
 #[macro_use]
 extern crate bitflags;
+extern crate hibitset;
 
 mod entities;
 mod world;
 mod resource;
 
-pub mod bitset;
 pub mod join;
 
 pub use entities::*;
