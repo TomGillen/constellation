@@ -62,29 +62,31 @@ update.queue_systems(|scope| {
         println!("Updating positions");
         // iterate through all components for entities with data in both
         // position and velocity resources
-        ctx.iter_r1w1(velocities, positions).components(|entity, v, p| {
-                p.x += v.x;
-                p.y += v.y;
-                p.z += v.z;
-        });
+        for (_, p, v) in (velocities, positions).iter().components() {
+            p.x += v.x;
+            p.y += v.y;
+            p.z += v.z;
+        }
     });
 
     scope.run_r2w0(|ctx, names: &DebugNames, positions: &Positions| {
         println!("Printing positions");
         // iterate through all entity IDs for entities with data in both
         // `names` and `positions`
-        ctx.iter_r2w0(names, positions).entities(|entity_iter, n, p| {
-            // `n` and `p` allow (potentially mutable) access to entity data inside
-            // the resource without the ability to add or remove entities from the resource
-            // - which would otherwise invalidate the iterator
-            for e in entity_iter {
-                println!("Entity {} is at {:?}",
-                         n.get(e).unwrap().name,
-                         p.get(e).unwrap());
-            }
+        let (entity_iter, n, p) = (names, positions).iter().entities(ctx);
+
+        // `n` and `p` allow (potentially mutable) access to entity data inside
+        // the resource without the ability to add or remove entities from the resource
+        // - which would otherwise invalidate the iterator
+        for e in entity_iter {
+            println!("Entity {} is at {:?}",
+                     n.get(e).unwrap().name,
+                     p.get(e).unwrap());
+        }
         });
     });
 });
+
 world.run(&mut update);
 ```
 
