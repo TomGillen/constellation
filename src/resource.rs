@@ -483,6 +483,7 @@ impl<'a, T> Iterator for VecStorageIterMut<'a, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use iter::*;
 
     #[test]
     fn map_deconstruct() {

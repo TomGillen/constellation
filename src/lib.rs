@@ -138,12 +138,14 @@ extern crate hibitset;
 mod entities;
 mod world;
 mod resource;
+mod iter;
 
 pub mod join;
 
 pub use entities::*;
 pub use world::*;
 pub use resource::*;
+pub use iter::*;
 
 #[cfg(test)]
 mod tests {

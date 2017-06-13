@@ -149,42 +149,10 @@ impl Entities {
     }
 }
 
-/// An iterator which converts indexes into entitiy IDs.
-pub struct EntityIter<'a, T>
-    where T: Iterator<Item = Index>
-{
-    entities: &'a Entities,
-    iter: T,
-}
-
-impl<'a, T: Iterator<Item = Index>> EntityIter<'a, T> {
-    /// Constructs a new 'EntityIter'.
-    pub fn new(entities: &'a Entities, iter: T) -> EntityIter<'a, T> {
-        EntityIter {
-            entities: entities,
-            iter: iter,
-        }
-    }
-}
-
-impl<'a, T: Iterator<Item = Index>> Iterator for EntityIter<'a, T> {
-    type Item = Entity;
-
-    #[inline]
-    fn next(&mut self) -> Option<Entity> {
-        self.iter.next().map(|i| self.entities.by_index(i))
-    }
-
-    #[inline]
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.iter.size_hint()
-    }
-}
-
 /// An entity transaction allows concurrent creations and deletions of entities
 /// from an `Entities`.
 pub struct EntitiesTransaction<'a> {
-    entities: &'a Entities,
+    pub(crate) entities: &'a Entities,
     deleted: Vec<Entity>,
 }
 
