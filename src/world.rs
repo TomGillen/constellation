@@ -4,11 +4,12 @@ use std::any::TypeId;
 use std::cell::UnsafeCell;
 use std::mem;
 use std::marker::PhantomData;
+use std::iter::Iterator;
 
 use rayon::prelude::*;
 use fnv::FnvHashMap;
 use arrayvec::ArrayVec;
-use hibitset::{BitSet, BitSetLike, BitIter, BitSetAnd};
+use hibitset::{BitSetLike, BitIter};
 
 use entities::*;
 use resource::*;
@@ -248,7 +249,7 @@ impl<S: Send + Sync + 'static> SystemCommandBuffer<S> {
     pub fn new() -> SystemCommandBuffer<S> {
         SystemCommandBuffer { batches: Vec::new() }
     }
-
+ 
     /// Queues a sequence of systems into the command buffer.
     /// Each system may potentially be run concurrently.
     pub fn queue_systems<'a, F, R>(&mut self, f: F) -> R
@@ -484,127 +485,203 @@ impl World {
     }
 }
 
-/// Provides methods for efficiently iterating through entity resources.
-pub struct EntityIteratorBuilder<'a, R, W> {
-    entities: &'a Entities,
+/// Stores data needed to iterate through entity data in a 
+/// set of resources.
+pub struct ResourceIterBuilder<I, R, W>
+{
+    iter: I,
     read_resources: R,
-    write_resources: W,
+    write_resources: W
 }
 
-impl<'a, R, W> EntityIteratorBuilder<'a, R, W> {
-    /// Constructs a new `EntityIteratorBuilder`.
-    fn new(entities: &'a Entities, read_resources: R, write_resources: W) -> EntityIteratorBuilder<'a, R, W> {
-        EntityIteratorBuilder {
-            entities: entities,
-            read_resources: read_resources,
-            write_resources: write_resources,
+/// A set of entity resources that can be iterated through.  
+/// This is implemented for tuples of entity resource references.
+pub trait ResourceIter {
+    /// The type of entity index iterator.
+    type Iter;
+
+    /// A tuple type containing immutable references to resources.
+    type Read;
+
+    /// A tuple type containing mutable references to resources.
+    type Write;
+
+    /// Begins construction of an entity resource iterator.
+    fn iter(self) -> ResourceIterBuilder<Self::Iter, Self::Read, Self::Write>;
+}
+
+/// An iterator of entity IDs for entities
+/// whom have data stored in a given set of resources.
+pub struct EntityIter<'b, I>
+    where I: 'b
+{
+    index_iter: I,
+    entities: &'b Entities,
+    phantom: PhantomData<&'b I>
+}
+
+impl<'b, I> Iterator for EntityIter<'b, I>
+    where I: Iterator<Item=Index> + 'b
+{
+    type Item = Entity;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        self.index_iter.next().map(|i| self.entities.by_index(i))
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.index_iter.size_hint()
+    }
+}
+
+/// An iterator of entity components for each
+/// entity with data stored in a given set of resources.
+pub struct ComponentIter<'b, I, R, W>
+    where I: 'b
+{
+    index_iter: I,
+    read_resource_apis: R,
+    write_resource_apis: W,
+    phantom: PhantomData<&'b I>
+}
+
+macro_rules! impl_resource_iterators {
+    ([$($read:ident),*] [$($write:ident),*]) => {
+        impl <'a, $($read,)* $($write,)*> ResourceIter for ($(&'a $read,)* $(&'a mut $write,)*)
+            where $($read: EntityResource + 'a,)*
+                  $($write: EntityResource + 'a,)*
+        {
+            type Iter = BitIter<<($(&'a $read::Filter,)* $(&'a $write::Filter,)*) as BitAnd>::Value>;
+            type Read = ($(&'a $read::Api,)*);
+            type Write = ($(&'a mut $write::Api,)*);
+
+            #[allow(non_snake_case)]
+            fn iter(self) -> ResourceIterBuilder<Self::Iter, Self::Read, Self::Write>
+            {
+                let ($($read,)* $($write,)*) = self;
+                $(let $read = $read.pin();)*
+                $(let $write = $write.pin_mut();)*
+
+                let iter = ($($read.0,)* $($write.0,)*).and().iter();
+
+                return ResourceIterBuilder {
+                    iter: iter,
+                    read_resources: ($($read.1,)*),
+                    write_resources: ($($write.1,)*)
+                };
+            }
+        }
+
+        impl <'a, I, $($read,)* $($write,)*> ResourceIterBuilder<I, ($(&'a $read,)*), ($(&'a mut $write,)*)>
+            where I: Iterator<Item=Index> + 'a,
+                  $($read: 'a,)*
+                  $($write: 'a,)*
+        {
+            /// Produces an iterator for iterating through all entity IDs for entities with data
+            /// stored in all given resources.
+            #[allow(non_snake_case)]
+            pub fn entities<C: Send + Sync>(self, ctx: &'a SystemContext<'a, C>) -> (EntityIter<'a, I>, $(&'a $read,)* $(&'a mut $write,)*)
+            {
+                let iter = self.iter;
+                let ($($read,)*) = self.read_resources;
+                let ($($write,)*) = self.write_resources;
+
+                return (
+                    EntityIter {
+                        index_iter: iter,
+                        entities: ctx.entities,
+                        phantom: PhantomData
+                    },
+                    $($read,)*
+                    $($write,)*
+                );
+            }
+        }       
+
+        impl <'a, I, $($read,)* $($write,)*> ResourceIterBuilder<I, ($(&'a $read,)*), ($(&'a mut $write,)*)>
+            where I: Iterator<Item=Index> + 'a,
+                  $($read: ComponentResourceApi + 'a,)*
+                  $($write: ComponentResourceApi + 'a,)*
+        {
+            /// Iterate through all entity components for entities with data
+            /// stored in all given resources.
+            #[allow(non_snake_case)]
+            pub fn components(self) -> ComponentIter<'a, I, ($(*const $read,)*), ($(*mut $write,)*)>
+            {
+                let ($($read,)*) = self.read_resources;
+                let ($($write,)*) = self.write_resources;
+
+                return ComponentIter {
+                    index_iter: self.iter,
+                    read_resource_apis: ($($read as *const $read,)*),
+                    write_resource_apis: ($($write as *mut $write,)*),
+                    phantom: PhantomData
+                };
+            }
+        }
+
+        impl<'b, I, $($read,)* $($write,)*> Iterator for ComponentIter<'b, I, ($(*const $read,)*), ($(*mut $write,)*)>
+            where I: Iterator<Item=Index> + 'b,
+                $($read: ComponentResourceApi + 'b,)*
+                $($write: ComponentResourceApi + 'b,)*
+        {
+            type Item = (Index, $(&'b $read::Component,)* $(&'b mut $write::Component,)*);
+
+            #[inline]
+            #[allow(non_snake_case)]
+            fn next(&mut self) -> Option<Self::Item> {                
+                self.index_iter.next().map(|i| {
+                    let ($($read,)*) = self.read_resource_apis;
+                    let ($($write,)*) = self.write_resource_apis;
+                    unsafe { (i, $((*$read).get_unchecked(i),)* $((*$write).get_unchecked_mut(i),)*) }
+                })
+            }
+
+            #[inline]
+            fn size_hint(&self) -> (usize, Option<usize>) {
+                self.index_iter.size_hint()
+            }
         }
     }
 }
 
-macro_rules! impl_entity_iterators {
-    ($name:ident [$($read:ident : $read_api:ident),*] [$($write:ident : $write_api:ident),*] [$iter:ty]) => (
-        impl<'a, S: Sync + Send> SystemContext<'a, S> {
-            /// Constructs an entity iterator builder for performing iterations
-            /// over the given resources.
-            #[allow(non_snake_case)]
-            pub fn $name<'b, $($read,)* $($write,)*>(&self, $($read: &'b $read,)* $($write: &'b mut $write,)*) -> EntityIteratorBuilder<'a, ($(&'b $read,)*), ($(&'b mut $write,)*)> 
-                where $($read: EntityResource,)*
-                      $($write: EntityResource,)*
-            {
-                EntityIteratorBuilder::new(self.entities, ($($read,)*), ($($write,)*))
-            }
-        }
-
-        impl<'b, 'c, $($read,)* $($write,)*> EntityIteratorBuilder<'b, ($(&'c $read,)*), ($(&'c mut $write,)*)>
-            where $($read: EntityResource,)*
-                  $($write: EntityResource,)*
-        {
-            /// Constructs an iterator which yields each entity with
-            /// data stored in all given entity resources.
-            ///
-            /// This function borrows each resource, preventing mutation of the
-            /// resource for the duration of its' scope. However, the user is
-            /// provided with restricted APIs for each resource which may allow
-            /// mutable access to entity data stored within the resource, without
-            /// allowing any operations which would invalidate the entity iterator.
-            #[allow(non_snake_case)]
-            pub fn entities<'a, F, R>(&mut self, f: F) -> R
-                where F: FnOnce(EntityIter<'b, $iter>, $(&$read::Api,)* $(&mut $write::Api,)*) -> R + 'a
-            {
-                let ($(ref $read,)*) = self.read_resources;
-                let ($(ref mut $write,)*) = self.write_resources;
-                $(let $read = $read.deconstruct();)*
-                $(let $write = $write.deconstruct_mut();)*
-                let iter = ($($read.0,)* $($write.0,)*).and().iter();
-
-                f(EntityIter::new(self.entities, iter), $($read.1,)* $($write.1,)*)
-            }
-        }
-
-        impl<'b, 'c, $($read, $read_api,)* $($write, $write_api,)*> EntityIteratorBuilder<'b, ($(&'c $read,)*), ($(&'c mut $write,)*)>
-            where $($read: EntityResource<Api=$read_api>,)*
-                  $($write: EntityResource<Api=$write_api>,)*
-                  $($read_api: ComponentResourceApi,)*
-                  $($write_api: ComponentResourceApi,)*
-        {
-            /// Constructs an iterator which yields the components associated
-            /// with all entities which have data stored in all of the given
-            /// resources.
-            #[allow(non_snake_case)]
-            pub fn components<'a, F>(&mut self, mut f: F)
-                where F: FnMut(Entity, 
-                            $(&<<$read as EntityResource>::Api as ComponentResourceApi>::Component,)*
-                            $(&mut <<$write as EntityResource>::Api as ComponentResourceApi>::Component,)*) + 'a
-            {
-                let ($(ref $read,)*) = self.read_resources;
-                let ($(ref mut $write,)*) = self.write_resources;
-                $(let $read = $read.deconstruct();)*
-                $(let $write = $write.deconstruct_mut();)*
-                let iter = ($($read.0,)* $($write.0,)*).and().iter();
-                
-                for e in EntityIter::new(self.entities, iter) {
-                    f(e, 
-                      $(unsafe{$read.1.get_unchecked(e)},)*
-                      $(unsafe{$write.1.get_unchecked_mut(e)},)*)
-                }
-            }
-        }
-    )
-}
-
-// todo: Find out why the compiler gets confused when using associated types in
-// the FnOnce with iterate entities for the iterator and BitSet.
-// Solving this would eliminate the need to provide the iterator type in the
-// macro invocations, and allow EntityResources to specify alternate BitSetLike
-// filters via associated types.
-//
-// The following expression expands out to the iterator type provided in the
-// below macro expansions:
-// `BitIter<<($(&$read::Filter,)* $(&$write::Filter,)*) as BitAnd>::Value>`
-//
-// The compiler does not expand this expression correctly when it is a parameter
-// in an FnOnce type. It does elsewhere.
-
-impl_entity_iterators!(iter_r0w1 [] [W0:W0Api] [BitIter<&BitSet>]);
-impl_entity_iterators!(iter_r0w2 [] [W0:W0Api, W1:W1Api] [BitIter<BitSetAnd<&BitSet, &BitSet>>]);
-impl_entity_iterators!(iter_r0w3 [] [W0:W0Api, W1:W1Api, W2:W2Api] [BitIter<BitSetAnd<&BitSet, BitSetAnd<&BitSet, &BitSet>>>]);
-impl_entity_iterators!(iter_r1w0 [R0:R0Api] [] [BitIter<&BitSet>]);
-impl_entity_iterators!(iter_r1w1 [R0:R0Api] [W0:W0Api] [BitIter<BitSetAnd<&BitSet, &BitSet>>]);
-impl_entity_iterators!(iter_r1w2 [R0:R0Api] [W0:W0Api, W1:W1Api] [BitIter<BitSetAnd<&BitSet, BitSetAnd<&BitSet, &BitSet>>>]);
-impl_entity_iterators!(iter_r1w3 [R0:R0Api] [W0:W0Api, W1:W1Api, W2:W2Api] [BitIter<BitSetAnd<BitSetAnd<&BitSet, &BitSet>, BitSetAnd<&BitSet, &BitSet>>>]);
-impl_entity_iterators!(iter_r2w0 [R0:R0Api, R1:R1Api] [] [BitIter<BitSetAnd<&BitSet, &BitSet>>]);
-impl_entity_iterators!(iter_r2w1 [R0:R0Api, R1:R1Api] [W0:W0Api] [BitIter<BitSetAnd<&BitSet, BitSetAnd<&BitSet, &BitSet>>>]);
-impl_entity_iterators!(iter_r2w2 [R0:R0Api, R1:R1Api] [W0:W0Api, W1:W1Api] [BitIter<BitSetAnd<BitSetAnd<&BitSet, &BitSet>, BitSetAnd<&BitSet, &BitSet>>>]);
-impl_entity_iterators!(iter_r2w3 [R0:R0Api, R1:R1Api] [W0:W0Api, W1:W1Api, W3:W2Api] [BitIter<BitSetAnd<BitSetAnd<&BitSet, &BitSet>, BitSetAnd<&BitSet, BitSetAnd<&BitSet, &BitSet>>>>]);
-impl_entity_iterators!(iter_r3w0 [R0:R0Api, R1:R1Api, R2:R2Api] [] [BitIter<BitSetAnd<&BitSet, BitSetAnd<&BitSet, &BitSet>>>]);
-impl_entity_iterators!(iter_r3w1 [R0:R0Api, R1:R1Api, R2:R2Api] [W0:W0Api] [BitIter<BitSetAnd<BitSetAnd<&BitSet, &BitSet>, BitSetAnd<&BitSet, &BitSet>>>]);
-impl_entity_iterators!(iter_r3w2 [R0:R0Api, R1:R1Api, R2:R2Api] [W0:W0Api, W1:W1Api] [BitIter<BitSetAnd<BitSetAnd<&BitSet, &BitSet>, BitSetAnd<&BitSet, BitSetAnd<&BitSet, &BitSet>>>>]);
-impl_entity_iterators!(iter_r3w3 [R0:R0Api, R1:R1Api, R2:R2Api] [W0:W0Api, W1:W1Api, W3:W2Api][BitIter<BitSetAnd<BitSetAnd<&BitSet, BitSetAnd<&BitSet, &BitSet>>, BitSetAnd<&BitSet, BitSetAnd<&BitSet, &BitSet>>>>]);
-impl_entity_iterators!(iter_r4w0 [R0:R0Api, R1:R1Api, R2:R2Api, R3:R3Api] [] [BitIter<BitSetAnd<BitSetAnd<&BitSet, &BitSet>, BitSetAnd<&BitSet, &BitSet>>>]);
-impl_entity_iterators!(iter_r4w1 [R0:R0Api, R1:R1Api, R2:R2Api, R3:R3Api] [W0:W0Api] [BitIter<BitSetAnd<BitSetAnd<&BitSet, &BitSet>, BitSetAnd<&BitSet, BitSetAnd<&BitSet, &BitSet>>>>]);
-impl_entity_iterators!(iter_r4w2 [R0:R0Api, R1:R1Api, R2:R2Api, R3:R3Api] [W0:W0Api, W1:W1Api] [BitIter<BitSetAnd<BitSetAnd<&BitSet, BitSetAnd<&BitSet, &BitSet>>, BitSetAnd<&BitSet, BitSetAnd<&BitSet, &BitSet>>>>]);
-impl_entity_iterators!(iter_r4w3 [R0:R0Api, R1:R1Api, R2:R2Api, R3:R3Api] [W0:W0Api, W1:W1Api, W3:W2Api] [BitIter<BitSetAnd<BitSetAnd<&BitSet, BitSetAnd<&BitSet, &BitSet>>, BitSetAnd<BitSetAnd<&BitSet, &BitSet>, BitSetAnd<&BitSet, &BitSet>>>>]);
+impl_resource_iterators!([R0] []);
+impl_resource_iterators!([R0, R1] []);
+impl_resource_iterators!([R0, R1, R2] []);
+impl_resource_iterators!([R0, R1, R2, R3] []);
+impl_resource_iterators!([R0, R1, R2, R3, R4] []);
+impl_resource_iterators!([] [W0]);
+impl_resource_iterators!([R0] [W0]);
+impl_resource_iterators!([R0, R1] [W0]);
+impl_resource_iterators!([R0, R1, R2] [W0]);
+impl_resource_iterators!([R0, R1, R2, R3] [W0]);
+impl_resource_iterators!([R0, R1, R2, R3, R4] [W0]);
+impl_resource_iterators!([] [W0, W1]);
+impl_resource_iterators!([R0] [W0, W1]);
+impl_resource_iterators!([R0, R1] [W0, W1]);
+impl_resource_iterators!([R0, R1, R2] [W0, W1]);
+impl_resource_iterators!([R0, R1, R2, R3] [W0, W1]);
+impl_resource_iterators!([R0, R1, R2, R3, R4] [W0, W1]);
+impl_resource_iterators!([] [W0, W1, W2]);
+impl_resource_iterators!([R0] [W0, W1, W2]);
+impl_resource_iterators!([R0, R1] [W0, W1, W2]);
+impl_resource_iterators!([R0, R1, R2] [W0, W1, W2]);
+impl_resource_iterators!([R0, R1, R2, R3] [W0, W1, W2]);
+impl_resource_iterators!([R0, R1, R2, R3, R4] [W0, W1, W2]);
+impl_resource_iterators!([] [W0, W1, W2, W3]);
+impl_resource_iterators!([R0] [W0, W1, W2, W3]);
+impl_resource_iterators!([R0, R1] [W0, W1, W2, W3]);
+impl_resource_iterators!([R0, R1, R2] [W0, W1, W2, W3]);
+impl_resource_iterators!([R0, R1, R2, R3] [W0, W1, W2, W3]);
+impl_resource_iterators!([R0, R1, R2, R3, R4] [W0, W1, W2, W3]);
+impl_resource_iterators!([] [W0, W1, W2, W3, W4]);
+impl_resource_iterators!([R0] [W0, W1, W2, W3, W4]);
+impl_resource_iterators!([R0, R1] [W0, W1, W2, W3, W4]);
+impl_resource_iterators!([R0, R1, R2] [W0, W1, W2, W3, W4]);
+impl_resource_iterators!([R0, R1, R2, R3] [W0, W1, W2, W3, W4]);
+impl_resource_iterators!([R0, R1, R2, R3, R4] [W0, W1, W2, W3, W4]);
 
 #[cfg(test)]
 mod tests {
@@ -942,22 +1019,22 @@ mod tests {
 
             scope.run_r1w0(|ctx, resource: &VecResource<u32>| {
                 println!("Verifying entity creation");
-                ctx.iter_r1w0(resource).entities(|iter, r| {
-                    for e in iter {
-                        assert_eq!(e.index(), *r.get(e).unwrap());
-                    }
-                });
+                let (iter, r) = (resource,).iter().entities(ctx);
+                for e in iter {
+                    assert_eq!(e.index(), *r.get(e).unwrap());
+                }
                 println!("Verified entity creation");
             });
 
             scope.run_r0w1(|ctx, resource: &mut VecResource<u32>| {
                 println!("Deleting entities");
                 let mut entities = Vec::<Entity>::new();
-                ctx.iter_r1w0(resource).entities(|iter, _| {
+                {
+                    let (iter, _) = (resource,).iter().entities(ctx);
                     for e in iter {
                         entities.push(e);
                     }
-                });
+                }
 
                 for e in entities {
                     ctx.destroy(e);
@@ -968,11 +1045,10 @@ mod tests {
             scope.run_r1w0(|ctx, resource: &VecResource<u32>| {
                 println!("Verifying entity deletion");
                 let mut entities = Vec::<Entity>::new();
-                ctx.iter_r1w0(resource).entities(|iter, _| {
-                    for e in iter {
-                        entities.push(e);
-                    }
-                });
+                let (iter, _) = (resource,).iter().entities(ctx);
+                for e in iter {
+                    entities.push(e);
+                }
 
                 assert_eq!(entities.len(), 0);
                 println!("Verified entity delection");
@@ -980,5 +1056,91 @@ mod tests {
         });
 
         world.run(&mut buffer);
+    }
+    
+    #[test]
+    fn entities_tuple_entities() {
+        let mut world = World::new();
+        world.register_resource(VecResource::<u32>::new());
+        world.register_resource(VecResource::<i32>::new());
+
+        let mut buffer = SystemCommandBuffer::default();
+        buffer.queue_systems(|scope| {
+            scope.run_r1w1(|ctx, a: &VecResource<u32>, b: &mut VecResource<i32>| {
+                {
+                    let (iter, r, w) = (a, &mut *b).iter().entities(ctx);
+                    for entity in iter {
+                        let x = r.get(entity).unwrap();
+                        let y = w.get_mut(entity).unwrap();
+                        println!("x={}, y={}", x, y);
+                    }
+                }
+
+                b.get(Entity::new(0, 0));
+            });
+        });
+    }
+
+    #[test]
+    fn entities_tuple_components() {
+        let mut world = World::new();
+        world.register_resource(VecResource::<u32>::new());
+        world.register_resource(VecResource::<i32>::new());
+
+        let mut buffer = SystemCommandBuffer::default();
+        buffer.queue_systems(|scope| {
+            scope.run_r1w1(|_, a: &VecResource<u32>, b: &mut VecResource<i32>| {
+                for (i, x, y) in (a, &mut *b).iter().components() {
+                    println!("{} has x={}, y={}", i, x, y);
+                }
+
+                b.get(Entity::new(0, 0));
+            });
+        });
+    }
+
+    #[test]
+    fn entities_tuple_entities_macro() {
+        let mut world = World::new();
+        world.register_resource(VecResource::<u32>::new());
+        world.register_resource(VecResource::<i32>::new());
+        world.register_resource(VecResource::<u64>::new());
+        world.register_resource(VecResource::<i64>::new());
+
+        let mut buffer = SystemCommandBuffer::default();
+        buffer.queue_systems(|scope| {
+            scope.run_r2w2(|ctx, a: &VecResource<u32>, b: &VecResource<i32>, c: &mut VecResource<u64>, d: &mut VecResource<i64>| {
+                {
+                    let (iter, r, _, w, _) = (a, b, &mut *c, &mut *d).iter().entities(ctx);
+                    for entity in iter {
+                        let x = r.get(entity).unwrap();
+                        let y = w.get_mut(entity).unwrap();
+                        println!("x={}, y={}", x, y);
+                    }
+                }
+
+                b.get(Entity::new(0, 0));
+            });
+        });
+    }
+
+    #[test]
+    fn entities_tuple_components_macro() {
+        let mut world = World::new();
+        world.register_resource(VecResource::<u32>::new());
+        world.register_resource(VecResource::<i32>::new());
+        world.register_resource(VecResource::<u64>::new());
+        world.register_resource(VecResource::<i64>::new());
+
+        let mut buffer = SystemCommandBuffer::default();
+        buffer.queue_systems(|scope| {
+            scope.run_r2w2(|_, a: &VecResource<u32>, b: &VecResource<i32>, c: &mut VecResource<u64>, d: &mut VecResource<i64>| {
+                for (i, x, y, z, w) in (a, b, &mut *c, &mut *d).iter().components() {
+                    println!("{} has x={}, y={} z={} w={}", i, x, y, z, w);
+                }
+
+                b.get(Entity::new(0, 0));
+            });
+        });
     }
 }

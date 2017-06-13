@@ -1,11 +1,9 @@
 use std::ops::{Deref, DerefMut};
-use std::collections::hash_map;
-use std::collections::hash_map::{Values, ValuesMut};
 use std::slice::{Iter, IterMut};
 use std::any::Any;
 
 use fnv::FnvHashMap;
-use hibitset::{BitSet};
+use hibitset::{BitSet, BitSetLike};
 
 use entities::*;
 use world::*;
@@ -41,7 +39,9 @@ impl Resource {
 
 /// An entity resource is a resource which stores data about entities.
 pub trait EntityResource: Resource {
-    // type Filter: BitSetLike;
+    /// The type of filter used to mark which entities have associated data
+    /// stored within the resource.
+    type Filter: BitSetLike;
 
     /// The type of API used to access the resource while its filter
     /// is write-locked behind a borrow.
@@ -52,11 +52,11 @@ pub trait EntityResource: Resource {
 
     /// Splits the entity resource into a bitset used for entity iteration,
     /// and its restricted API.
-    fn deconstruct(&self) -> (&BitSet, &Self::Api);
+    fn pin(&self) -> (&Self::Filter, &Self::Api);
 
     /// Splits the entity resource into a bitset used for entity iteration,
     /// and its restricted API.
-    fn deconstruct_mut(&mut self) -> (&BitSet, &mut Self::Api);
+    fn pin_mut(&mut self) -> (&Self::Filter, &mut Self::Api);
 }
 
 /// A component resource is a resource which stores data related to entities
@@ -81,7 +81,7 @@ pub trait ComponentResourceApi {
     /// This function performs no bounds checking. Requesting data for an entity
     /// that does not represent a living entity with data in this resource
     /// will return an undefined result.
-    unsafe fn get_unchecked(&self, entity: Entity) -> &Self::Component;
+    unsafe fn get_unchecked(&self, entity_index: Index) -> &Self::Component;
 
     /// Gets a mutable reference to the component associated with the given
     /// entity without performing any bounds or liveness checking.
@@ -91,7 +91,7 @@ pub trait ComponentResourceApi {
     /// This function performs no bounds checking. Requesting data for an entity
     /// that does not represent a living entity with data in this resource
     /// will return an undefined result.
-    unsafe fn get_unchecked_mut(&mut self, entity: Entity) -> &mut Self::Component;
+    unsafe fn get_unchecked_mut(&mut self, entity_index: Index) -> &mut Self::Component;
 }
 
 /// A `MapResource` stores per-entity data in a `HashMap`.
@@ -114,17 +114,28 @@ impl<T: Any + Send + Sync> MapResource<T> {
 
     /// Adds entity data to the resource.
     pub fn add(&mut self, entity: Entity, component: T) {
-        self.storage.m.insert(entity, component);
-        self.filter.add(entity.index());
+        let index = entity.index();
+        let generation = entity.generation();
+        self.storage.m.insert(index, (component, generation));
+        self.filter.add(index);
     }
 
     /// Removes entity data from the resource.
     pub fn remove(&mut self, entity: Entity) -> Option<T> {
-        let component = self.storage.m.remove(&entity);
-        if component.is_some() {
-            self.filter.remove(entity.index());
+        let index = entity.index();
+        match self.storage.m.remove(&index) {
+            Some((value, generation)) => {
+                if generation == entity.generation() {
+                    self.filter.remove(index);
+                    Some(value)
+                }
+                else {
+                    self.storage.m.insert(index, (value, generation));
+                    None
+                }
+            },
+            None => None
         }
-        return component;
     }
 }
 
@@ -141,14 +152,14 @@ impl<T: Any + Send + Sync> Resource for MapResource<T> {
 }
 
 impl<T: Any + Send + Sync> EntityResource for MapResource<T> {
-    // type Filter = BitSet;
+    type Filter = BitSet;
     type Api = MapStorage<T>;
 
-    fn deconstruct(&self) -> (&BitSet, &MapStorage<T>) {
+    fn pin(&self) -> (&Self::Filter, &Self::Api) {
         (&self.filter, &self.storage)
     }
 
-    fn deconstruct_mut(&mut self) -> (&BitSet, &mut MapStorage<T>) {
+    fn pin_mut(&mut self) -> (&Self::Filter, &mut Self::Api) {
         (&self.filter, &mut self.storage)
     }
 }
@@ -170,32 +181,34 @@ impl<T: Any + Send + Sync> DerefMut for MapResource<T> {
 /// Provides methods to retrieve and mutate entity data
 /// stored inside a `MapResource`.
 pub struct MapStorage<T> {
-    m: FnvHashMap<Entity, T>,
+    m: FnvHashMap<Index, (T, Generation)>
 }
 
 impl<T> MapStorage<T> {
     fn new() -> MapStorage<T> {
-        MapStorage { m: FnvHashMap::default() }
+        MapStorage {
+            m: FnvHashMap::default()
+        }
     }
 
     /// Gets an iterator over all entity data stored in the resource.
-    pub fn iter_components(&self) -> Values<Entity, T> {
-        self.m.values()
+    pub fn iter_components<'a>(&'a self) -> Box<Iterator<Item=&'a T> + 'a> {
+        Box::new(self.m.values().map(|&(ref v, _)| v))
     }
 
     /// Gets an iterator over all entity data stored in the resource.
-    pub fn iter_components_mut(&mut self) -> ValuesMut<Entity, T> {
-        self.m.values_mut()
+    pub fn iter_components_mut<'a>(&'a mut self) -> Box<Iterator<Item=&'a mut T> + 'a> {
+        Box::new(self.m.values_mut().map(|&mut (ref mut v, _)| v))
     }
 
     /// Gets an iterator over all entity data stored in the resource.
-    pub fn iter(&self) -> hash_map::Iter<Entity, T> {
-        self.m.iter()
+    pub fn iter<'a>(&'a self) -> Box<Iterator<Item=(Entity, &'a T)> + 'a> {
+        Box::new(self.m.iter().map(|(i, &(ref v, g))| (Entity::new(*i, g), v)))
     }
 
     /// Gets an iterator over all entity data stored in the resource.
-    pub fn iter_mut(&mut self) -> hash_map::IterMut<Entity, T> {
-        self.m.iter_mut()
+    pub fn iter_mut<'a>(&'a mut self) -> Box<Iterator<Item=(Entity, &'a mut T)> + 'a> {
+        Box::new(self.m.iter_mut().map(|(i, &mut (ref mut v, g))| (Entity::new(*i, g), v)))
     }
 }
 
@@ -203,21 +216,31 @@ impl<T> ComponentResourceApi for MapStorage<T> {
     type Component = T;
 
     fn get(&self, entity: Entity) -> Option<&T> {
-        self.m.get(&entity)
+        let generation = entity.generation();
+        match self.m.get(&entity.index()) {
+            Some(&(ref value, g)) if g == generation => Some(value),
+            _ => None
+        }
     }
 
     #[inline]
-    unsafe fn get_unchecked(&self, entity: Entity) -> &T {
-        self.m.get(&entity).unwrap()
+    unsafe fn get_unchecked(&self, entity_index: Index) -> &T {
+        let &(ref value, _) = self.m.get(&entity_index).unwrap();
+        value
     }
 
     fn get_mut(&mut self, entity: Entity) -> Option<&mut T> {
-        self.m.get_mut(&entity)
+        let generation = entity.generation();
+        match self.m.get_mut(&entity.index()) {
+            Some(&mut (ref mut value, g)) if g == generation => Some(value),
+            _ => None
+        }
     }
 
     #[inline]
-    unsafe fn get_unchecked_mut(&mut self, entity: Entity) -> &mut T {
-        self.m.get_mut(&entity).unwrap()
+    unsafe fn get_unchecked_mut(&mut self, entity_index: Index) -> &mut T {
+        let &mut (ref mut value, _) = self.m.get_mut(&entity_index).unwrap();
+        value
     }
 }
 
@@ -307,14 +330,14 @@ impl<T: Any + Send + Sync> VecResource<T> {
 }
 
 impl<T: Any + Send + Sync> EntityResource for VecResource<T> {
-    // type Filter = BitSet;
+    type Filter = BitSet;
     type Api = VecStorage<T>;
 
-    fn deconstruct(&self) -> (&BitSet, &VecStorage<T>) {
+    fn pin(&self) -> (&Self::Filter, &Self::Api) {
         (&self.filter, &self.storage)
     }
 
-    fn deconstruct_mut(&mut self) -> (&BitSet, &mut VecStorage<T>) {
+    fn pin_mut(&mut self) -> (&Self::Filter, &mut Self::Api) {
         (&self.filter, &mut self.storage)
     }
 }
@@ -378,8 +401,8 @@ impl<T> ComponentResourceApi for VecStorage<T> {
     }
 
     #[inline]
-    unsafe fn get_unchecked(&self, entity: Entity) -> &T {
-        self.v.get_unchecked(entity.index() as usize)
+    unsafe fn get_unchecked(&self, entity_index: Index) -> &T {
+        self.v.get_unchecked(entity_index as usize)
     }
 
     fn get_mut(&mut self, entity: Entity) -> Option<&mut T> {
@@ -391,8 +414,8 @@ impl<T> ComponentResourceApi for VecStorage<T> {
     }
 
     #[inline]
-    unsafe fn get_unchecked_mut(&mut self, entity: Entity) -> &mut T {
-        self.v.get_unchecked_mut(entity.index() as usize)
+    unsafe fn get_unchecked_mut(&mut self, entity_index: Index) -> &mut T {
+        self.v.get_unchecked_mut(entity_index as usize)
     }
 }
 
@@ -469,7 +492,7 @@ mod tests {
         map.add(entity, 5u32);
         assert_eq!(*map.get(entity).unwrap(), 5u32);
 
-        let (bitset, api) = <MapResource<u32> as EntityResource>::deconstruct(&map);
+        let (bitset, api) = <MapResource<u32> as EntityResource>::pin(&map);
         assert!(bitset.contains(entity.index()));
         assert_eq!(*api.get(entity).unwrap(), 5u32);
     }
@@ -482,7 +505,7 @@ mod tests {
         map.add(entity, 5u32);
         assert_eq!(*map.get(entity).unwrap(), 5u32);
 
-        let (bitset, api) = <MapResource<u32> as EntityResource>::deconstruct_mut(map);
+        let (bitset, api) = <MapResource<u32> as EntityResource>::pin_mut(map);
         assert!(bitset.contains(entity.index()));
         assert_eq!(*api.get(entity).unwrap(), 5u32);
         *api.get_mut(entity).unwrap() = 6u32;
@@ -550,24 +573,21 @@ mod tests {
             });
 
             scope.run_r2w1(|ctx, map: &MapResource<u32>, vec: &VecResource<u32>, out: &mut VecResource<u64>| {
-                ctx.iter_r2w1(map, vec, out).entities(|iter, m, v, o| {
-                    for e in iter {
-                        let x = unsafe { o.get_unchecked_mut(e) };
-                        *x = (*v.get(e).unwrap() + *m.get(e).unwrap()) as u64;
-                    }
-                });
+                let (iter, m, v, o) = (map, vec, out).iter().entities(ctx);
+                for e in iter {
+                    let x = unsafe { o.get_unchecked_mut(e.index()) };
+                    *x = (*v.get(e).unwrap() + *m.get(e).unwrap()) as u64;
+                }
             });
 
             scope.run_r3w0(|ctx, map: &MapResource<u32>, vec: &VecResource<u32>, out: &VecResource<u64>| {
                 let mut checked = 0;
 
-                ctx.iter_r3w0(map, vec, out).entities(|iter, m, v, o| {
-                    for e in iter {
-                        assert_eq!(*o.get(e).unwrap(),
-                                   (m.get(e).unwrap() + v.get(e).unwrap()) as u64);
-                        checked = checked + 1;
-                    }
-                });
+                let (iter, m, v, o) = (map, vec, out).iter().entities(ctx);
+                for e in iter {
+                    assert_eq!(*o.get(e).unwrap(), (m.get(e).unwrap() + v.get(e).unwrap()) as u64);
+                    checked = checked + 1;
+                }
 
                 assert_eq!(checked, 2);
             });

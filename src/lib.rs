@@ -78,11 +78,11 @@
 //!
 //!         // iterate through all components for entities with data in both
 //!         // position and velocity resources
-//!         ctx.iter_r1w1(velocities, positions).components(|entity, v, p| {
+//!         for (_, v, p) in (velocities, positions).iter().components() {
 //!             p.x += v.x;
 //!             p.y += v.y;
 //!             p.z += v.z;
-//!         });
+//!         };
 //!     });
 //!
 //!     scope.run_r2w0(|ctx, names: &DebugNames, positions: &Positions| {
@@ -90,16 +90,16 @@
 //!
 //!         // iterate through all entity IDs for entities with data in both
 //!         // `names` and `positions`
-//!         ctx.iter_r2w0(names, positions).entities(|entity_iter, n, p| {
-//!             // `n` and `p` allow (potentially mutable) access to entity data inside
-//!             // the resource without the ability to add or remove entities from the resource
-//!             // - which would otherwise invalidate the iterator
-//!             for e in entity_iter {
-//!                 println!("Entity {} is at {:?}",
-//!                          n.get(e).unwrap().name,
-//!                          p.get(e).unwrap());
-//!             }
-//!         });
+//!         let (iter, n, p) = (names, positions).iter().entities(ctx);
+//!         
+//!         // `n` and `p` allow (potentially mutable) access to entity data inside
+//!         // the resource without the ability to add or remove entities from the resource
+//!         // - which would otherwise invalidate the iterator
+//!         for entity in iter {
+//!             println!("Entity {} is at {:?}",
+//!                      n.get(entity).unwrap().name,
+//!                      p.get(entity).unwrap());
+//!         }
 //!     });
 //! });
 //!
@@ -187,16 +187,14 @@ mod tests {
 
         let mut update = SystemCommandBuffer::default();
         update.queue_systems(|scope| {
-            scope.run_r1w1(|ctx, velocities: &Velocities, positions: &mut Positions| {
+            scope.run_r1w1(|_, velocities: &Velocities, positions: &mut Positions| {
                 println!("Updating positions");
 
-                ctx.iter_r1w1(velocities, positions).components(|e, v, p| {
+                for (_, v, p) in (velocities, positions).iter().components() {
                     p.x += v.x;
                     p.y += v.y;
                     p.z += v.z;
-
-                    ctx.destroy(e);
-                });
+                };
             });
         });
 
