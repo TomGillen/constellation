@@ -83,7 +83,6 @@ update.queue_systems(|scope| {
                      n.get(e).unwrap().name,
                      p.get(e).unwrap());
         }
-        });
     });
 });
 
